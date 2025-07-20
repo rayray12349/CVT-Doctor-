@@ -5,6 +5,7 @@ from reportlab.lib.pagesizes import letter
 from reportlab.pdfgen import canvas
 import tempfile
 import os
+import io
 
 st.set_page_config(page_title="CVT Doctor", layout="centered")
 st.title("CVT Doctor - Automated Subaru CVT Diagnostics")
@@ -27,7 +28,9 @@ if uploaded_file is not None:
             st.error("Header row not found. Please ensure the file is a valid SSM4/BtSsm CSV.")
             st.stop()
 
-        df = pd.read_csv(pd.compat.StringIO("\n".join(lines[header_idx:])))
+        # Parse the CSV using StringIO
+        csv_data = "\n".join(lines[header_idx:])
+        df = pd.read_csv(io.StringIO(csv_data))
         st.success("File loaded successfully.")
         st.dataframe(df.head())
 
@@ -38,7 +41,7 @@ if uploaded_file is not None:
                 df[col] = pd.to_numeric(df[col], errors='coerce')
         df.dropna(subset=numeric_columns, inplace=True)
 
-        # Diagnostics logic
+        # Diagnostic logic
         findings = []
         if 'Actual Gear Ratio' in df.columns:
             if (df['Actual Gear Ratio'] < 0.5).any():
@@ -46,12 +49,12 @@ if uploaded_file is not None:
         
         if 'Line Pressure' in df.columns:
             if df['Line Pressure'].max() < 500:
-                findings.append("⚠️ Line Pressure never exceeded 500 kPa — possible weak pressure control or failing pump.")
+                findings.append("⚠️ Line Pressure never exceeded 500 kPa — Possible weak pressure control or failing pump.")
         
         if 'Throttle Opening Angle' in df.columns and 'Primary Rev Speed' in df.columns:
             lag = df[df['Throttle Opening Angle'] > 30].copy()
             if (lag['Primary Rev Speed'].diff() > 1000).any():
-                findings.append("⚠️ Primary speed delay with high throttle — possible valve body delay.")
+                findings.append("⚠️ Primary speed delay with high throttle — Possible valve body delay.")
         
         if 'Secondary Rev Speed' in df.columns and 'Engine Speed' in df.columns:
             slip = abs(df['Engine Speed'] - df['Secondary Rev Speed'])
@@ -61,7 +64,7 @@ if uploaded_file is not None:
         if not findings:
             findings.append("✅ No major anomalies detected based on current diagnostics rules.")
 
-        # Show graph
+        # Show chart
         st.subheader("CVT Performance Graph")
         fig, ax = plt.subplots()
         for col in ['Engine Speed', 'Primary Rev Speed', 'Actual Gear Ratio']:
@@ -70,7 +73,7 @@ if uploaded_file is not None:
         ax.legend()
         st.pyplot(fig)
 
-        # Generate PDF
+        # Save to PDF
         with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
             pdf_path = tmp.name
             c = canvas.Canvas(pdf_path, pagesize=letter)
@@ -94,7 +97,6 @@ if uploaded_file is not None:
             c.drawImage(plot_path, 50, y - 300, width=500, height=300)
             c.save()
 
-        # Download button
         with open(pdf_path, "rb") as f:
             st.download_button("📄 Download Full Diagnostic PDF", f, file_name="CVT_Report.pdf")
 
