@@ -24,16 +24,19 @@ if uploaded_file is not None:
             break
 
     if header_idx is not None:
-if uploaded_file is not None:
-    try:
-        df = pd.read_csv(uploaded_file, skiprows=header_idx)
-    except Exception as e:
-        st.error(f"Error reading CSV: {e}")
+        try:
+            df = pd.read_csv(uploaded_file, skiprows=header_idx)
+            st.success("File loaded and parsed successfully!")
+            st.dataframe(df.head())
+        except Exception as e:
+            st.error(f"Error reading CSV: {e}")
+            st.stop()
+    else:
+        st.error("Could not detect header row. Please check the file format.")
         st.stop()
 else:
     st.warning("Please upload a file to begin.")
     st.stop()
-        st.success("File loaded and parsed successfully!")
 
         # Plot sample graph
         numeric_columns = ['Engine Speed', 'Primary Rev Speed', 'Actual Gear Ratio']
