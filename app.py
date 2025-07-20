@@ -1,123 +1,124 @@
 import streamlit as st
 import pandas as pd
 import matplotlib.pyplot as plt
-from reportlab.lib.pagesizes import letter
-from reportlab.pdfgen import canvas
-import tempfile
-import os
 from io import BytesIO
+from reportlab.pdfgen import canvas
+from reportlab.lib.pagesizes import letter
 
-st.title("CVT Doctor - Automated Subaru CVT Diagnostics")
+# App title
+st.set_page_config(page_title="CVT Doctor", layout="wide")
+st.title("🔧 CVT Doctor – Automated Subaru CVT Diagnostics")
 
-uploaded_file = st.file_uploader("Upload your SSM4/BtSsm CSV file", type="csv")
+# File upload
+uploaded_file = st.file_uploader("Upload your SSM4/BtSsm CSV file", type=["csv"])
 
-if uploaded_file is not None:
-    try:
-        content = uploaded_file.read().decode('ISO-8859-1')
-        lines = content.splitlines()
+if uploaded_file:
+    # Try to detect and skip metadata
+    lines = uploaded_file.getvalue().decode('ISO-8859-1').splitlines()
+    header_row = next((i for i, line in enumerate(lines[:100]) if 'Primary' in line or 'Gear Ratio' in line), 0)
+    df = pd.read_csv(uploaded_file, encoding='ISO-8859-1', skiprows=header_row)
 
-        header_idx = None
-        for i, line in enumerate(lines[:100]):
-            if "Primary" in line or "Secondary" in line or "Gear Ratio" in line:
-                header_idx = i
-                break
+    # Clean relevant PIDs
+    required_columns = {
+        'Engine Speed': 'Engine Speed',
+        'Turbine Revolution Speed': 'Turbine RPM',
+        'Primary Rev Speed': 'Primary RPM',
+        'Accel. Opening Angle': 'Throttle %',
+        'Lock Up Duty Ratio': 'TCC Lockup',
+        'Actual line press.': 'Line Pressure',
+        'Lin. Sol. Set Current': 'Set Current',
+        'Lin. Sol. Actual Current': 'Actual Current',
+        'ATF Temp.': 'ATF Temp',
+        'System Voltage': 'Voltage'
+    }
 
-        if header_idx is None:
-            st.error("Could not detect header row.")
-            st.stop()
+    for col in required_columns:
+        if col in df.columns:
+            df[required_columns[col]] = pd.to_numeric(df[col], errors='coerce')
 
-        df = pd.read_csv(BytesIO(content.encode('ISO-8859-1')), skiprows=header_idx)
-        st.success("File loaded successfully.")
-        st.dataframe(df.head())
+    st.success("✅ Data loaded successfully.")
+    
+    # Plotting
+    fig, axs = plt.subplots(3, 1, figsize=(10, 10))
+    df_clean = df.dropna(subset=list(required_columns.values()))
 
-        findings = []
-        plots = []
+    axs[0].plot(df_clean['Engine Speed'], label='Engine RPM')
+    axs[0].plot(df_clean['Primary RPM'], label='Primary RPM', linestyle='--')
+    axs[0].plot(df_clean['Turbine RPM'], label='Turbine RPM', linestyle=':')
+    axs[0].legend()
+    axs[0].set_title("Engine vs Turbine vs Primary RPM")
 
-        # Gear Ratio Analysis
-        if 'Actual Gear Ratio' in df.columns:
-            df['Actual Gear Ratio'] = pd.to_numeric(df['Actual Gear Ratio'], errors='coerce')
-            if (df['Actual Gear Ratio'] < 0.5).any():
-                findings.append("- ⚠️ Gear ratio dropped below 0.5 — Possible belt slippage or low line pressure.")
+    axs[1].plot(df_clean['Throttle %'], label='Throttle %')
+    axs[1].plot(df_clean['TCC Lockup'], label='TCC Lockup Duty', linestyle='--')
+    axs[1].legend()
+    axs[1].set_title("Throttle vs Torque Converter Lockup")
 
-            fig, ax = plt.subplots()
-            df['Actual Gear Ratio'].plot(ax=ax, title='Actual Gear Ratio')
-            ax.set_ylabel('Ratio')
-            plots.append(fig)
+    axs[2].plot(df_clean['Line Pressure'], label='Actual Line Pressure')
+    axs[2].plot(df_clean['Set Current'], label='Set Current', linestyle='--')
+    axs[2].plot(df_clean['Actual Current'], label='Actual Current', linestyle=':')
+    axs[2].legend()
+    axs[2].set_title("Line Pressure vs Solenoid Currents")
 
-        # Line Pressure Analysis
-        if 'Line Pressure' in df.columns:
-            df['Line Pressure'] = pd.to_numeric(df['Line Pressure'], errors='coerce')
-            if (df['Line Pressure'] < 400).any():
-                findings.append("- ⚠️ Line pressure dropped below 400 — Possible leaking valve body or weak pressure control solenoid.")
+    st.pyplot(fig)
 
-            fig, ax = plt.subplots()
-            df['Line Pressure'].plot(ax=ax, title='Line Pressure (psi)')
-            ax.set_ylabel('Pressure')
-            plots.append(fig)
+    # Diagnostics Summary
+    issues = []
+    if df_clean['ATF Temp'].max() > 220:
+        issues.append("⚠ High CVT fluid temperature detected (>220°F).")
+    if (df_clean['Engine Speed'] - df_clean['Turbine RPM']).abs().mean() > 300:
+        issues.append("⚠ Possible torque converter slip.")
+    if (df_clean['Line Pressure'] < 170).any():
+        issues.append("⚠ Line pressure dropped below 170psi during load.")
+    
+    if issues:
+        st.warning("🛠 Diagnostic Findings:")
+        for issue in issues:
+            st.write(f"- {issue}")
+    else:
+        st.success("✅ No critical CVT issues detected in this session.")
 
-        # Torque Converter Judder
-        if 'Engine Speed' in df.columns and 'Turbine Revolution' in df.columns:
-            df['Engine Speed'] = pd.to_numeric(df['Engine Speed'], errors='coerce')
-            df['Turbine Revolution'] = pd.to_numeric(df['Turbine Revolution'], errors='coerce')
-            rpm_diff = abs(df['Engine Speed'] - df['Turbine Revolution'])
-            if (rpm_diff > 300).sum() > 50:
-                findings.append("- ⚠️ High Engine vs. Turbine RPM difference — Possible torque converter judder.")
+    # Optional Repair Section
+    st.markdown("### 🔧 Optional Repair Recommendations")
+    if st.checkbox("Include recommendations in PDF report?"):
+        repair_suggestions = [
+            "• Perform CVTF exchange with Subaru High Torque CVTF.",
+            "• Reflash TCM with latest firmware (check SOA updates).",
+            "• Perform solenoid pressure test on line and secondary regulators.",
+            "• Inspect torque converter clutch for judder or wear symptoms."
+        ]
+        for tip in repair_suggestions:
+            st.write(tip)
+    else:
+        repair_suggestions = []
 
-            fig, ax = plt.subplots()
-            df['Engine Speed'].plot(ax=ax, label='Engine RPM')
-            df['Turbine Revolution'].plot(ax=ax, label='Turbine RPM')
-            ax.set_title('RPM Comparison')
-            ax.legend()
-            ax.set_ylabel('RPM')
-            plots.append(fig)
+    # PDF Export
+    def generate_pdf():
+        buffer = BytesIO()
+        c = canvas.Canvas(buffer, pagesize=letter)
+        c.setFont("Helvetica-Bold", 16)
+        c.drawString(50, 750, "CVT Diagnostic Report")
 
-        # Throttle vs RPM
-        if 'Throttle Opening Angle' in df.columns and 'Engine Speed' in df.columns:
-            df['Throttle Opening Angle'] = pd.to_numeric(df['Throttle Opening Angle'], errors='coerce')
-            correlation = df['Throttle Opening Angle'].corr(df['Engine Speed'])
-            if correlation < 0.3:
-                findings.append("- ⚠️ Weak throttle vs. RPM correlation — Possible throttle delay or intake issue.")
+        c.setFont("Helvetica", 12)
+        y = 720
+        c.drawString(50, y, "Summary:")
+        for issue in issues:
+            y -= 20
+            c.drawString(70, y, f"- {issue}")
+        
+        if repair_suggestions:
+            y -= 40
+            c.setFont("Helvetica-Bold", 12)
+            c.drawString(50, y, "Recommended Actions:")
+            c.setFont("Helvetica", 12)
+            for tip in repair_suggestions:
+                y -= 20
+                c.drawString(70, y, tip)
 
-            fig, ax = plt.subplots()
-            df['Throttle Opening Angle'].plot(ax=ax, title='Throttle Opening Angle')
-            ax.set_ylabel('Degrees')
-            plots.append(fig)
+        c.showPage()
+        c.save()
+        buffer.seek(0)
+        return buffer
 
-        # Display Results
-        if findings:
-            st.subheader("Diagnostic Findings:")
-            for item in findings:
-                st.markdown(item)
-        else:
-            st.success("No major issues detected.")
-
-        st.subheader("Performance Graphs:")
-        for fig in plots:
-            st.pyplot(fig)
-
-        # PDF Export
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-            pdf_path = tmp.name
-            c = canvas.Canvas(pdf_path, pagesize=letter)
-            c.setFont("Helvetica-Bold", 14)
-            c.drawString(50, 750, "CVT Diagnostic Report")
-            c.setFont("Helvetica", 10)
-            c.drawString(50, 735, "This report was generated automatically based on uploaded SSM4/BtSsm data.")
-            y = 715
-            if findings:
-                c.drawString(50, y, "Diagnostic Findings:")
-                y -= 15
-                for item in findings:
-                    c.drawString(60, y, item)
-                    y -= 15
-            else:
-                c.drawString(50, y, "No major issues detected.")
-            c.save()
-
-        with open(pdf_path, "rb") as f:
-            st.download_button("Download Diagnostic PDF", f, file_name="CVT_Report.pdf")
-
-    except Exception as e:
-        st.error(f"Error processing file: {e}")
-else:
-    st.warning("Please upload a file to begin.")
+    if st.button("📄 Download PDF Report"):
+        pdf = generate_pdf()
+        st.download_button("Download Report", data=pdf, file_name="CVT_Diagnostic_Report.pdf")
