@@ -24,7 +24,15 @@ if uploaded_file is not None:
             break
 
     if header_idx is not None:
+        if uploaded_file is not None:
+    try:
         df = pd.read_csv(uploaded_file, skiprows=header_idx)
+    except Exception as e:
+        st.error(f"Error reading CSV: {e}")
+        st.stop()
+else:
+    st.warning("Please upload a file to begin.")
+    st.stop()
         st.success("File loaded and parsed successfully!")
 
         # Plot sample graph
