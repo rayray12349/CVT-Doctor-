@@ -5,9 +5,8 @@ from reportlab.lib.pagesizes import letter
 from reportlab.pdfgen import canvas
 import tempfile
 import os
-import io
+from io import BytesIO
 
-st.set_page_config(page_title="CVT Doctor", layout="centered")
 st.title("CVT Doctor - Automated Subaru CVT Diagnostics")
 
 uploaded_file = st.file_uploader("Upload your SSM4/BtSsm CSV file", type="csv")
@@ -17,63 +16,86 @@ if uploaded_file is not None:
         content = uploaded_file.read().decode('ISO-8859-1')
         lines = content.splitlines()
 
-        # Detect header row
         header_idx = None
         for i, line in enumerate(lines[:100]):
-            if "Primary" in line and "Engine Speed" in line:
+            if "Primary" in line or "Secondary" in line or "Gear Ratio" in line:
                 header_idx = i
                 break
 
         if header_idx is None:
-            st.error("Header row not found. Please ensure the file is a valid SSM4/BtSsm CSV.")
+            st.error("Could not detect header row.")
             st.stop()
 
-        # Parse the CSV using StringIO
-        csv_data = "\n".join(lines[header_idx:])
-        df = pd.read_csv(io.StringIO(csv_data))
+        df = pd.read_csv(BytesIO(content.encode('ISO-8859-1')), skiprows=header_idx)
         st.success("File loaded successfully.")
         st.dataframe(df.head())
 
-        # Normalize data types
-        numeric_columns = ['Engine Speed', 'Primary Rev Speed', 'Actual Gear Ratio', 'Line Pressure', 'Throttle Opening Angle', 'Secondary Rev Speed']
-        for col in numeric_columns:
-            if col in df.columns:
-                df[col] = pd.to_numeric(df[col], errors='coerce')
-        df.dropna(subset=numeric_columns, inplace=True)
-
-        # Diagnostic logic
         findings = []
+        plots = []
+
+        # Gear Ratio Analysis
         if 'Actual Gear Ratio' in df.columns:
+            df['Actual Gear Ratio'] = pd.to_numeric(df['Actual Gear Ratio'], errors='coerce')
             if (df['Actual Gear Ratio'] < 0.5).any():
-                findings.append("⚠️ Gear ratio dropped below 0.5 — Possible belt slippage or low line pressure.")
-        
+                findings.append("- ⚠️ Gear ratio dropped below 0.5 — Possible belt slippage or low line pressure.")
+
+            fig, ax = plt.subplots()
+            df['Actual Gear Ratio'].plot(ax=ax, title='Actual Gear Ratio')
+            ax.set_ylabel('Ratio')
+            plots.append(fig)
+
+        # Line Pressure Analysis
         if 'Line Pressure' in df.columns:
-            if df['Line Pressure'].max() < 500:
-                findings.append("⚠️ Line Pressure never exceeded 500 kPa — Possible weak pressure control or failing pump.")
-        
-        if 'Throttle Opening Angle' in df.columns and 'Primary Rev Speed' in df.columns:
-            lag = df[df['Throttle Opening Angle'] > 30].copy()
-            if (lag['Primary Rev Speed'].diff() > 1000).any():
-                findings.append("⚠️ Primary speed delay with high throttle — Possible valve body delay.")
-        
-        if 'Secondary Rev Speed' in df.columns and 'Engine Speed' in df.columns:
-            slip = abs(df['Engine Speed'] - df['Secondary Rev Speed'])
-            if (slip > 500).sum() > 10:
-                findings.append("⚠️ High slip between engine and secondary speed — Possible torque converter judder.")
+            df['Line Pressure'] = pd.to_numeric(df['Line Pressure'], errors='coerce')
+            if (df['Line Pressure'] < 400).any():
+                findings.append("- ⚠️ Line pressure dropped below 400 — Possible leaking valve body or weak pressure control solenoid.")
 
-        if not findings:
-            findings.append("✅ No major anomalies detected based on current diagnostics rules.")
+            fig, ax = plt.subplots()
+            df['Line Pressure'].plot(ax=ax, title='Line Pressure (psi)')
+            ax.set_ylabel('Pressure')
+            plots.append(fig)
 
-        # Show chart
-        st.subheader("CVT Performance Graph")
-        fig, ax = plt.subplots()
-        for col in ['Engine Speed', 'Primary Rev Speed', 'Actual Gear Ratio']:
-            if col in df.columns:
-                ax.plot(df.index, df[col], label=col)
-        ax.legend()
-        st.pyplot(fig)
+        # Torque Converter Judder
+        if 'Engine Speed' in df.columns and 'Turbine Revolution' in df.columns:
+            df['Engine Speed'] = pd.to_numeric(df['Engine Speed'], errors='coerce')
+            df['Turbine Revolution'] = pd.to_numeric(df['Turbine Revolution'], errors='coerce')
+            rpm_diff = abs(df['Engine Speed'] - df['Turbine Revolution'])
+            if (rpm_diff > 300).sum() > 50:
+                findings.append("- ⚠️ High Engine vs. Turbine RPM difference — Possible torque converter judder.")
 
-        # Save to PDF
+            fig, ax = plt.subplots()
+            df['Engine Speed'].plot(ax=ax, label='Engine RPM')
+            df['Turbine Revolution'].plot(ax=ax, label='Turbine RPM')
+            ax.set_title('RPM Comparison')
+            ax.legend()
+            ax.set_ylabel('RPM')
+            plots.append(fig)
+
+        # Throttle vs RPM
+        if 'Throttle Opening Angle' in df.columns and 'Engine Speed' in df.columns:
+            df['Throttle Opening Angle'] = pd.to_numeric(df['Throttle Opening Angle'], errors='coerce')
+            correlation = df['Throttle Opening Angle'].corr(df['Engine Speed'])
+            if correlation < 0.3:
+                findings.append("- ⚠️ Weak throttle vs. RPM correlation — Possible throttle delay or intake issue.")
+
+            fig, ax = plt.subplots()
+            df['Throttle Opening Angle'].plot(ax=ax, title='Throttle Opening Angle')
+            ax.set_ylabel('Degrees')
+            plots.append(fig)
+
+        # Display Results
+        if findings:
+            st.subheader("Diagnostic Findings:")
+            for item in findings:
+                st.markdown(item)
+        else:
+            st.success("No major issues detected.")
+
+        st.subheader("Performance Graphs:")
+        for fig in plots:
+            st.pyplot(fig)
+
+        # PDF Export
         with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
             pdf_path = tmp.name
             c = canvas.Canvas(pdf_path, pagesize=letter)
@@ -81,26 +103,21 @@ if uploaded_file is not None:
             c.drawString(50, 750, "CVT Diagnostic Report")
             c.setFont("Helvetica", 10)
             c.drawString(50, 735, "This report was generated automatically based on uploaded SSM4/BtSsm data.")
-
-            y = 710
-            c.setFont("Helvetica-Bold", 12)
-            c.drawString(50, y, "Diagnostic Findings:")
-            y -= 15
-            c.setFont("Helvetica", 10)
-            for finding in findings:
-                c.drawString(60, y, f"- {finding}")
+            y = 715
+            if findings:
+                c.drawString(50, y, "Diagnostic Findings:")
                 y -= 15
-
-            # Save plot
-            plot_path = tmp.name.replace(".pdf", ".png")
-            fig.savefig(plot_path)
-            c.drawImage(plot_path, 50, y - 300, width=500, height=300)
+                for item in findings:
+                    c.drawString(60, y, item)
+                    y -= 15
+            else:
+                c.drawString(50, y, "No major issues detected.")
             c.save()
 
         with open(pdf_path, "rb") as f:
-            st.download_button("📄 Download Full Diagnostic PDF", f, file_name="CVT_Report.pdf")
+            st.download_button("Download Diagnostic PDF", f, file_name="CVT_Report.pdf")
 
     except Exception as e:
-        st.error(f"File parsing error: {e}")
+        st.error(f"Error processing file: {e}")
 else:
-    st.warning("Please upload a CSV file to begin analysis.")
+    st.warning("Please upload a file to begin.")
