@@ -20,11 +20,11 @@ if uploaded_file is not None:
     for i, line in enumerate(lines[:100]):
         if "Primary" in line or "Secondary" in line or "Gear Ratio" in line:
             header_idx = i
-            break
-
-    if header_idx is not None:
-        try:
-            df = pd.read_csv(uploaded_file, skiprows=header_idx)
+            
+            if header_idx is not None:
+    try:
+        uploaded_file.seek(0)  # Reset file pointer after .read()
+        df = pd.read_csv(uploaded_file, skiprows=header_idx)
             st.success("File loaded and parsed successfully!")
             st.dataframe(df.head())
 
