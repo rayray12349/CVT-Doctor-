@@ -11,25 +11,25 @@ st.title("CVT Doctor - Automated Subaru CVT Diagnostics")
 uploaded_file = st.file_uploader("Upload your SSM4/BtSsm CSV file", type="csv")
 
 if uploaded_file is not None:
-    # Read uploaded CSV
-    content = uploaded_file.read().decode('ISO-8859-1')
-    lines = content.splitlines()
+    try:
+        # First read to detect headers
+        content = uploaded_file.read().decode('ISO-8859-1')
+        lines = content.splitlines()
 
-    # Detect header row
-    header_idx = None
-    for i, line in enumerate(lines[:100]):
-        if "Primary" in line or "Secondary" in line or "Gear Ratio" in line:
-            header_idx = i
-            break
+        # Detect header row
+        header_idx = None
+        for i, line in enumerate(lines[:100]):
+            if "Primary" in line or "Secondary" in line or "Gear Ratio" in line:
+                header_idx = i
+                break
 
-    if header_idx is not None:
-        try:
-            uploaded_file.seek(0)  # Reset file pointer before re-reading
-            df = pd.read_csv(uploaded_file, skiprows=header_idx)
+        if header_idx is not None:
+            uploaded_file.seek(0)  # Reset file for actual parsing
+            df = pd.read_csv(uploaded_file, skiprows=header_idx, encoding='ISO-8859-1')
             st.success("File loaded and parsed successfully!")
             st.dataframe(df.head())
 
-            # Plot sample graph
+            # Plot graphs
             numeric_columns = ['Engine Speed', 'Primary Rev Speed', 'Actual Gear Ratio']
             for col in numeric_columns:
                 if col in df.columns:
@@ -38,25 +38,26 @@ if uploaded_file is not None:
             df.dropna(subset=numeric_columns, inplace=True)
             st.line_chart(df[numeric_columns])
 
-            # Save PDF
+            # Save PDF report
             with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
                 pdf_path = tmp.name
                 c = canvas.Canvas(pdf_path, pagesize=letter)
                 c.setFont("Helvetica-Bold", 14)
                 c.drawString(100, 750, "CVT Diagnostic Report")
                 c.setFont("Helvetica", 10)
-                c.drawString(100, 730, "This report was generated automatically based on uploaded SSM4 data.")
+                c.drawString(100, 730, "This report was generated automatically based on uploaded SSM4/BtSsm data.")
                 c.save()
 
             with open(pdf_path, "rb") as f:
                 st.download_button("Download Diagnostic PDF", f, file_name="CVT_Report.pdf")
 
-        except Exception as e:
-            st.error(f"Error reading CSV: {e}")
+        else:
+            st.error("Could not detect a valid data header in the file.")
             st.stop()
-    else:
-        st.error("Could not detect header row. Please check the file format.")
+
+    except Exception as e:
+        st.error(f"Error reading CSV: {e}")
         st.stop()
+
 else:
     st.warning("Please upload a file to begin.")
-    st.stop()
