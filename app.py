@@ -24,7 +24,7 @@ if uploaded_file is not None:
             break
 
     if header_idx is not None:
-        if uploaded_file is not None:
+if uploaded_file is not None:
     try:
         df = pd.read_csv(uploaded_file, skiprows=header_idx)
     except Exception as e:
