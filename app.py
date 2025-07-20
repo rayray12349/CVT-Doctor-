@@ -9,7 +9,19 @@ from reportlab.lib.pagesizes import letter
 from reportlab.lib.utils import ImageReader
 
 st.set_page_config(page_title="CVT Doctor Pro", layout="wide")
-st.title("🔧 CVT Doctor Pro – Advanced Subaru CVT Analyzer (TSB-Calibrated)")
+st.title("🔧 CVT Doctor Pro – Subaru CVT Analyzer (Fixed Column Mapping)")
+
+# --- Column Normalization ---
+column_rename_map = {
+    "Engine Speed": "Engine RPM",
+    "Primary Rev Speed": "Primary RPM",
+    "Secondary Rev Speed": "Secondary RPM",
+    "Accel. Opening Angle": "Throttle %",
+    "Turbine Revolution Speed": "Turbine RPM",
+    "Actual Gear Ratio": "Gear Ratio",
+    "Lock Up Duty Ratio": "TCC Lockup %",
+    "ATF Temp.": "ATF Temp (°F)"
+}
 
 # --- Modular Diagnostic Functions ---
 def detect_chain_slip(df):
@@ -39,6 +51,7 @@ def detect_micro_slip(df):
             if stable.iloc[i] and ratio_var.iloc[i] > 0.01:
                 events.append({'Type': 'Micro Slip', 'Time': df.index[i], 'Severity': 'Low', 'Details': f'Ratio Δ={ratio_var.iloc[i]:.3f}'})
     return events
+
 def detect_short_slip(df):
     events = []
     if 'Gear Ratio' in df.columns:
@@ -84,7 +97,7 @@ def detect_pressure_temp(df):
     if 'ATF Temp (°F)' in df.columns and df['ATF Temp (°F)'].max() > 160:
         events.append({'Type': 'High ATF Temp', 'Time': df[df['ATF Temp (°F)'] > 160].index[0], 'Severity': 'Moderate', 'Details': '>160°F'})
     return events
-# --- Event Aggregation ---
+
 def aggregate_events(df):
     all_events = []
     for func in [detect_chain_slip, detect_secondary_rpm_slip, detect_micro_slip,
@@ -93,16 +106,16 @@ def aggregate_events(df):
         all_events.extend(func(df))
     return sorted(all_events, key=lambda x: x["Time"])
 
-# --- Streamlit Interface ---
+# --- Streamlit App Interface ---
 uploaded_file = st.file_uploader("📤 Upload Subaru CVT CSV Log", type=["csv"])
 if uploaded_file:
     raw = uploaded_file.read().decode("ISO-8859-1").splitlines()
     header_row = 8
     df = pd.read_csv(BytesIO('\n'.join(raw[header_row:]).encode("utf-8")))
+    df.rename(columns=column_rename_map, inplace=True)
     df.index = range(len(df))
-    st.success("✅ File loaded successfully.")
+    st.success("✅ File loaded and columns mapped.")
 
-    # Plot Engine vs Primary RPM
     if 'Engine RPM' in df.columns and 'Primary RPM' in df.columns:
         fig, ax = plt.subplots()
         ax.plot(df['Engine RPM'], label='Engine RPM')
@@ -111,15 +124,13 @@ if uploaded_file:
         ax.legend()
         st.pyplot(fig)
 
-    # Run diagnostics
     events = aggregate_events(df)
     if events:
         st.subheader("⚠️ Diagnostic Events")
         st.dataframe(pd.DataFrame(events))
     else:
-        st.success("✅ No major issues detected based on current thresholds.")
+        st.success("✅ No major faults detected based on current thresholds.")
 
-    # Generate PDF summary
     if st.button("📄 Export PDF Report"):
         buffer = BytesIO()
         c = canvas.Canvas(buffer, pagesize=letter)
