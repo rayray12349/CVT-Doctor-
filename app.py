@@ -119,7 +119,7 @@ if uploaded_file:
         st.subheader("⚠️ Detected Events (TSB-Based)")
         for e in events:
             st.markdown(f"**{e['Time']} - {e['Type']}**: {e['Details']}")
-                    if st.button("📄 Export PDF Report"):
+    if st.button("📄 Export PDF Report"):
             buffer = BytesIO()
             c = canvas.Canvas(buffer, pagesize=letter)
             c.setFont("Helvetica", 12)
