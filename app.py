@@ -166,9 +166,12 @@ if uploaded_file:
 
     if events:
         st.subheader("⚠️ TSB-Based Diagnostic Events")
-        for ev in events:
-            st.markdown(f"**{ev['Time']} - {ev['Type']}**: {ev['Details']}")
-            st.pyplot(ev['Graph'])
+        max_display = 20
+        for i, ev in enumerate(events[:max_display]):
+            with st.expander(f"{ev['Time']} - {ev['Type']}"):
+                st.markdown(f"**Details**: {ev['Details']}")
+                if st.button(f"Show Graph {i+1}", key=f"graph_{i}"):
+                    st.pyplot(ev['Graph'])
 
         if st.button("📄 Export TSB PDF Report"):
             buffer = BytesIO()
