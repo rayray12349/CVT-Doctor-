@@ -1,140 +1,122 @@
 import streamlit as st
 import pandas as pd
-import numpy as np
-from io import BytesIO
-from reportlab.pdfgen import canvas
-from reportlab.lib.pagesizes import letter
 
-st.set_page_config(page_title="CVT Doctor Pro – 7 Mode TSB", layout="wide")
-st.title("🧠 CVT Doctor Pro – Subaru TSB 7 Concern Diagnostic")
+st.set_page_config(page_title="CVT Doctor Pro", layout="wide")
+st.title("🔧 CVT Doctor Pro – Subaru CVT TSB Diagnostic Tool")
+st.subheader("Upload a Subaru CVT CSV log file")
 
-column_rename_map = {
-    "Engine Speed": "Engine RPM",
-    "Primary Rev Speed": "Primary RPM",
-    "Secondary Rev Speed": "Secondary RPM",
-    "Accel. Opening Angle": "Throttle %",
-    "Turbine Revolution Speed": "Turbine RPM",
-    "Actual Gear Ratio": "Gear Ratio",
-    "Lock Up Duty Ratio": "TCC Lockup %",
-    "ATF Temp.": "ATF Temp (°F)",
-    "Front Wheel Speed": "Front Wheel Speed (RPM)"
+uploaded_file = st.file_uploader("Upload CSV", type=["csv"])
+cvt_type = st.selectbox("Select CVT Type", ["TR580", "TR690"])
+
+TSB_THRESHOLDS = {
+    "micro": 200,
+    "short": (3, 500, 800),
+    "long": (10, 500, 800),
+    "lockup": 3,
+    "forward_clutch_slip": 600,
+    "valve_body": 20,
+    "tc_judder": 3
 }
 
-cvt_type = st.selectbox("Select CVT Type", ["TR580", "TR690"])
-def detect_forward_clutch_slip(df):
-    events = []
-    eng_rpm = pd.to_numeric(df.get("Engine RPM"), errors="coerce")
-    if "Front Wheel Speed (RPM)" not in df.columns:
-        st.warning("Missing 'Front Wheel Speed (RPM)' column for TR690.")
-        return []
-    wheel_rpm = pd.to_numeric(df.get("Front Wheel Speed (RPM)"), errors="coerce")
-    for i in range(len(df)):
-        if eng_rpm.iloc[i] > 1200 and abs(eng_rpm.iloc[i] - wheel_rpm.iloc[i]) > 600:
-            events.append({"Type": "Forward Clutch Slip", "Time": i, "Details": f"RPM Δ > 600 ({eng_rpm.iloc[i]} vs {wheel_rpm.iloc[i]})"})
-    return events
+def clean_csv(file):
+    df = pd.read_csv(file, skiprows=9, encoding='ISO-8859-1')
+    df = df.dropna(axis=1, how='all')
+    return df
 
 def detect_micro_slip(df):
-    events = []
-    throttle = pd.to_numeric(df.get("Throttle %"), errors="coerce")
-    gear_ratio = pd.to_numeric(df.get("Gear Ratio"), errors="coerce")
-    primary_rpm = pd.to_numeric(df.get("Primary RPM"), errors="coerce")
-    secondary_rpm = pd.to_numeric(df.get("Secondary RPM"), errors="coerce")
-    throttle_std = throttle.rolling(10, min_periods=1).std()
-    primary_fluct = primary_rpm.diff().abs().rolling(5).mean()
-    secondary_fluct = secondary_rpm.diff().abs().rolling(5).mean()
-    ratio_fluct = gear_ratio.diff().abs().rolling(5).mean()
-    for i in range(len(df)):
-        if (throttle_std.iloc[i] < 1.5 and
-            ((primary_fluct.iloc[i] > 50) or (secondary_fluct.iloc[i] > 50)) and
-            ratio_fluct.iloc[i] > 0.02):
-            events.append({"Type": "Micro Slip", "Time": i, "Details": "Fluctuating RPM/ratio under steady throttle"})
-    return events
-def detect_judder(df):
-    events = []
-    gear_ratio = pd.to_numeric(df.get("Gear Ratio"), errors="coerce")
-    judder_score = gear_ratio.diff().rolling(5).std()
-    for i in range(len(df)):
-        if judder_score.iloc[i] > 0.05:
-            events.append({"Type": "Judder Detected", "Time": i, "Details": f"Gear Ratio variance: {judder_score.iloc[i]:.4f}"})
-    return events
-
-def detect_lockup_issue(df):
-    events = []
-    tcc = pd.to_numeric(df.get("TCC Lockup %"), errors="coerce")
-    turbine_rpm = pd.to_numeric(df.get("Turbine RPM"), errors="coerce")
-    secondary_rpm = pd.to_numeric(df.get("Secondary RPM"), errors="coerce")
-    for i in range(len(df)):
-        if tcc.iloc[i] > 85 and abs(turbine_rpm.iloc[i] - secondary_rpm.iloc[i]) > 200:
-            events.append({"Type": "Lockup Malfunction", "Time": i, "Details": f"TCC active, RPM Δ > 200"})
-    return events
-
-def detect_solenoid_delay(df):
-    events = []
-    throttle = pd.to_numeric(df.get("Throttle %"), errors="coerce")
-    gear_ratio = pd.to_numeric(df.get("Gear Ratio"), errors="coerce")
-    for i in range(1, len(df)):
-        if throttle.iloc[i] > 10 and gear_ratio.iloc[i-1] == gear_ratio.iloc[i]:
-            events.append({"Type": "Solenoid Delay", "Time": i, "Details": "No gear ratio response after throttle"})
-    return events
-def detect_long_slip(df):
-    events = []
-    primary = pd.to_numeric(df.get("Primary RPM"), errors="coerce")
-    secondary = pd.to_numeric(df.get("Secondary RPM"), errors="coerce")
-    for i in range(len(df)):
-        if primary.iloc[i] - secondary.iloc[i] > 800:
-            events.append({"Type": "Long Slip", "Time": i, "Details": f"RPM Δ = {primary.iloc[i] - secondary.iloc[i]}"})
-    return events
+    return [(i, f"Micro Slip: ΔRPM {abs(df['Engine RPM'].iloc[i] - df['Primary RPM'].iloc[i]):.1f} > 200")
+            for i in range(len(df))
+            if abs(df['Engine RPM'].iloc[i] - df['Primary RPM'].iloc[i]) > TSB_THRESHOLDS["micro"]]
 
 def detect_short_slip(df):
-    events = []
-    primary = pd.to_numeric(df.get("Primary RPM"), errors="coerce")
-    secondary = pd.to_numeric(df.get("Secondary RPM"), errors="coerce")
-    slip = primary - secondary
-    for i in range(3, len(df)):
-        if all((slip.iloc[i-j] > 500 and slip.iloc[i-j] < 800) for j in range(3)):
-            events.append({"Type": "Short Slip", "Time": i, "Details": "3-frame slip between 500–800 RPM"})
-    return events
-def aggregate_all_tsb(df, cvt_type):
+    slips = []
+    for i in range(len(df) - 3):
+        window = df.iloc[i:i + 3]
+        diffs = (window["Engine RPM"] - window["Primary RPM"]).abs()
+        if diffs.gt(500).all() and diffs.lt(800).all():
+            slips.append((i, "Short Slip: 3-frame slip between 500–800 RPM"))
+    return slips
+
+def detect_long_slip(df):
+    slips = []
+    for i in range(len(df) - 10):
+        window = df.iloc[i:i + 10]
+        diffs = (window["Engine RPM"] - window["Primary RPM"]).abs()
+        if diffs.gt(500).all() and diffs.lt(800).all():
+            slips.append((i, "Long Slip: 10-frame slip between 500–800 RPM"))
+    return slips
+
+def detect_lockup_slip(df):
+    slips = []
+    for i in range(len(df) - 3):
+        window = df.iloc[i:i + 3]
+        if (window["Lock Up Duty Ratio"] > 90).all():
+            if (window["Engine RPM"] - window["Primary RPM"]).abs().gt(200).any():
+                slips.append((i, "Lockup Slip: RPM slip > 200 with Lock Up Duty > 90%"))
+    return slips
+
+def detect_forward_clutch_slip(df, cvt_type):
+    if cvt_type != "TR690":
+        return []
+    if "Front Wheel Speed.1" not in df.columns:
+        return [(-1, "❌ Missing PID: Front Wheel Speed.1 (RPM)")]
+    slips = []
+    for i in range(len(df)):
+        try:
+            throttle = df["Throttle Opening Angle"].iloc[i]
+            gear = df["Actual Gear Ratio"].iloc[i]
+            engine_rpm = df["Engine RPM"].iloc[i]
+            wheel_rpm = df["Front Wheel Speed.1"].iloc[i]
+            if throttle > 1 and gear > 1.5:
+                diff = abs(engine_rpm - wheel_rpm)
+                if diff > TSB_THRESHOLDS["forward_clutch_slip"]:
+                    slips.append((i, f"Forward Clutch Slip: ΔRPM {diff:.1f} > 600"))
+        except:
+            continue
+    return slips
+
+def detect_valve_body_behavior(df):
+    diffs = df["Line Pressure"].diff().abs()
+    return [(i, f"Valve Body Behavior: Line Pressure jump {diff:.1f} > 20")
+            for i, diff in diffs.items() if diff > TSB_THRESHOLDS["valve_body"]]
+
+def detect_torque_converter_judder(df):
+    slips = []
+    for i in range(len(df) - 3):
+        rpm_series = df["Engine RPM"].iloc[i:i+3]
+        if rpm_series.diff().abs().gt(100).all():
+            slips.append((i, "Torque Converter Judder: RPM fluctuation > 100 over 3 frames"))
+    return slips
+
+def aggregate_events(df, cvt_type):
     all_events = []
-    if cvt_type == "TR690":
-        all_events += detect_forward_clutch_slip(df)
-    all_events += detect_micro_slip(df)
-    all_events += detect_judder(df)
-    all_events += detect_lockup_issue(df)
-    all_events += detect_solenoid_delay(df)
-    all_events += detect_long_slip(df)
-    all_events += detect_short_slip(df)
-    return sorted(all_events, key=lambda x: x["Time"])[:100]
+    detectors = [
+        detect_micro_slip,
+        detect_short_slip,
+        detect_long_slip,
+        detect_lockup_slip,
+        lambda d: detect_forward_clutch_slip(d, cvt_type),
+        detect_valve_body_behavior,
+        detect_torque_converter_judder
+    ]
+    for func in detectors:
+        try:
+            all_events.extend(func(df))
+        except Exception as e:
+            all_events.append((-1, f"❌ Error in {func.__name__}: {str(e)}"))
+    return sorted(all_events, key=lambda x: x[0])
 
-uploaded_file = st.file_uploader("📤 Upload CVT CSV File", type=["csv"])
 if uploaded_file:
-    raw = uploaded_file.read().decode("ISO-8859-1").splitlines()
-    df = pd.read_csv(BytesIO('\n'.join(raw[8:]).encode("utf-8")))
-    df.rename(columns=column_rename_map, inplace=True)
-    df.index = range(len(df))
-    st.success("✅ File loaded.")
+    df = clean_csv(uploaded_file)
+    st.success("✅ File loaded. Columns detected:")
+    st.code(", ".join(df.columns.tolist()))
 
-    events = aggregate_all_tsb(df, cvt_type)
-    if events:
-        st.subheader("⚠️ Detected Events (TSB-Based)")
-        for e in events:
-            st.markdown(f"**{e['Time']} - {e['Type']}**: {e['Details']}")
-    if st.button("📄 Export PDF Report"):
-            buffer = BytesIO()
-            c = canvas.Canvas(buffer, pagesize=letter)
-            c.setFont("Helvetica", 12)
-            c.drawString(30, 750, "CVT Doctor Pro – TSB Report")
-            y = 730
-            for ev in events:
-                c.drawString(30, y, f"{ev['Time']} – {ev['Type']} – {ev['Details']}")
-                y -= 15
-                if y < 40:
-                    c.showPage()
-                    y = 750
-            c.save()
-            buffer.seek(0)
-            st.download_button("📥 Download PDF", buffer, file_name="tsb_report.pdf")
+    with st.spinner("Running diagnostics..."):
+        results = aggregate_events(df, cvt_type)
+
+    st.subheader("📋 Diagnostic Results")
+    if results:
+        for i, msg in results:
+            st.markdown(f"- **Row {i}**: {msg}")
     else:
-        st.success("✅ No TSB fault patterns detected.")
-else:
-    st.info("Please upload a valid Subaru CVT data file.")
+        st.success("✅ No abnormal TSB-related behaviors detected.")
