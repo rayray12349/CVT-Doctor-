@@ -52,7 +52,7 @@ def detect_micro_slip(df):
                 'Graph': plot_event(df, ["Gear Ratio", "Throttle %", "Primary RPM", "Secondary RPM"], "TSB Micro-Slip", i)
             })
     return events
-    for i in range(1, len(df)):
+        for i in range(1, len(df)):
         if lock.iloc[i] > 85 and abs(turb.iloc[i] - eng.iloc[i]) > 300:
             events.append({
                 'Type': 'Lock-Up Engagement Shock',
