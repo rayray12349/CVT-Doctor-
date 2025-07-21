@@ -5,113 +5,95 @@ st.set_page_config(page_title="CVT Doctor Pro", layout="wide")
 st.title("🔧 CVT Doctor Pro – Subaru TSB Diagnostic Tool")
 
 uploaded_file = st.file_uploader("📤 Upload Subaru CVT CSV Log", type=["csv"])
+
+# CVT type dropdown for correct PID mapping
+cvt_type = st.selectbox("Select CVT Type", ["TR580", "TR690"])
+
 if uploaded_file is not None:
-    # Skip metadata lines and read clean column headers
     try:
-        df = pd.read_csv(uploaded_file, skiprows=8, encoding="ISO-8859-1")
+        df = pd.read_csv(uploaded_file, skiprows=8, encoding='ISO-8859-1')
     except Exception as e:
-        st.error(f"❌ CSV read error: {e}")
+        st.error(f"CSV read error: {e}")
         st.stop()
 
-    # Show initial column headers for review
     st.success("✅ File loaded. Columns detected:")
     st.code(", ".join(df.columns))
 
-    # Rename known generic columns
-    column_map = {
-        "rpm": "Engine RPM",
-        "rpm.1": "Primary RPM",
-        "%": "Throttle Opening Angle",
-        "°F": "ATF Temp",
-        "%.1": "Lock Up Duty Ratio",
-        "Unnamed: 13": "Line Pressure",
-        "rpm.2": "Front Wheel Speed.1"
+    # Rename common PIDs based on CVT type
+    if cvt_type == "TR690":
+        front_wheel_speed_col = "Front Wheel Speed.1 (RPM)"
+    else:
+        front_wheel_speed_col = None  # TR580 does not use it
+
+    # Define key PID mappings (standardized)
+    pid_map = {
+        "engine_rpm": "Engine RPM",
+        "primary_rpm": "Primary Rev",
+        "secondary_rpm": "Secondary Rev",
+        "line_pressure": "Line Pressure",
+        "gear_ratio": "Gear Ratio",
+        "lockup_duty": "Lock Up Duty Ratio",
+        "mph": "Vehicle Speed (MPH)",
     }
-    df.rename(columns={k: v for k, v in column_map.items() if k in df.columns}, inplace=True)
 
-    # TR580/TR690 dropdown
-    cvt_type = st.selectbox("Select CVT Type", ["TR580", "TR690"])
-    front_wheel_pid = "Front Wheel Speed.1" if cvt_type == "TR690" else None
+    results = []
 
-    def detect_micro_slip(df):
-        if "Engine RPM" in df.columns and "Primary RPM" in df.columns:
-            slip = (df["Engine RPM"] - df["Primary RPM"]).abs()
-            return [f"{i} - Micro Slip: {val} RPM" for i, val in enumerate(slip) if val > 200]
-        else:
-            return []
+    # Helper: get safe column
+    def safe_col(df, col):
+        return df[col] if col in df.columns else None
 
-    def detect_short_slip(df):
-        if "Engine RPM" in df.columns and "Primary RPM" in df.columns:
-            slips = []
-            for i in range(len(df) - 3):
-                window = (df["Engine RPM"].iloc[i:i+3] - df["Primary RPM"].iloc[i:i+3]).abs()
-                if window.gt(500).all() and window.lt(800).all():
-                    slips.append(f"{i} - Short Slip: 3-frame slip between 500–800 RPM")
-            return slips
-        else:
-            return []
-
-    def detect_long_slip(df):
-        if "Engine RPM" in df.columns and "Primary RPM" in df.columns:
-            slips = []
-            for i in range(len(df) - 6):
-                window = (df["Engine RPM"].iloc[i:i+6] - df["Primary RPM"].iloc[i:i+6]).abs()
-                if window.gt(500).all():
-                    slips.append(f"{i} - Long Slip: 6-frame slip > 500 RPM")
-            return slips
-        else:
-            return []
-
-    def detect_lockup_slip(df):
-        if "Engine RPM" in df.columns and "Primary RPM" in df.columns and "Lock Up Duty Ratio" in df.columns:
-            slip = df["Lock Up Duty Ratio"].rolling(3).mean() > 80
-            rpm_delta = (df["Engine RPM"] - df["Primary RPM"]).abs()
-            return [f"{i} - Lockup Slip: {val} RPM with Lockup > 80%" for i, val in enumerate(rpm_delta) if slip.iloc[i] and val > 300]
-        else:
-            return []
-
-    def detect_forward_clutch_slip(df):
-        if "Engine RPM" in df.columns and "Primary RPM" in df.columns:
-            throttle = df["Throttle Opening Angle"] if "Throttle Opening Angle" in df.columns else pd.Series([2] * len(df))
-            speed = df[front_wheel_pid] if front_wheel_pid and front_wheel_pid in df.columns else pd.Series([3] * len(df))
-            rpm_delta = (df["Engine RPM"] - df["Primary RPM"]).abs()
-            return [f"{i} - Forward Clutch Slip: Δ={rpm_delta.iloc[i]} | Throttle={throttle.iloc[i]} | Speed={speed.iloc[i]}" for i in range(len(rpm_delta)) if rpm_delta.iloc[i] > 600 and throttle.iloc[i] > 1 and speed.iloc[i] > 2]
-        else:
-            return []
-
-    def detect_valve_body_behavior(df):
-        if "Line Pressure" in df.columns and "Throttle Opening Angle" in df.columns:
-            anomalies = df["Line Pressure"].rolling(5).std() > 30
-            return [f"{i} - Valve Body Anomaly: Line Pressure variance" for i in anomalies[anomalies].index]
-        else:
-            return []
-
+    # Judder detection logic (torque converter)
     def detect_torque_converter_judder(df):
-        if "Engine RPM" in df.columns:
-            judder = df["Engine RPM"].diff().abs().rolling(5).std() > 50
-            return [f"{i} - Torque Converter Judder: RPM instability" for i in judder[judder].index]
-        else:
-            return []
+        engine_rpm = safe_col(df, pid_map["engine_rpm"])
+        mph = safe_col(df, pid_map["mph"])
+        if engine_rpm is None or mph is None:
+            return "❌ Error: Missing 'Engine RPM' or 'Vehicle Speed (MPH)'"
+        judder_events = []
+        for i in range(2, len(df)):
+            if 5 < mph.iloc[i] < 50:
+                delta1 = abs(engine_rpm.iloc[i] - engine_rpm.iloc[i - 1])
+                delta2 = abs(engine_rpm.iloc[i - 1] - engine_rpm.iloc[i - 2])
+                if delta1 > 200 and delta2 > 200:
+                    judder_events.append(i)
+        return f"✅ Detected {len(judder_events)} torque converter judder events." if judder_events else "✅ No judder detected."
 
-    diagnostic_functions = [
-        detect_micro_slip,
-        detect_short_slip,
-        detect_long_slip,
-        detect_lockup_slip,
-        detect_forward_clutch_slip,
-        detect_valve_body_behavior,
-        detect_torque_converter_judder
-    ]
+    # Forward clutch slip detection (TR690 only)
+    def detect_forward_clutch_slip(df):
+        if cvt_type != "TR690":
+            return "ℹ️ Not applicable for TR580."
+        rpm_col = safe_col(df, pid_map["engine_rpm"])
+        wheels_col = safe_col(df, front_wheel_speed_col)
+        if rpm_col is None or wheels_col is None:
+            return "❌ Error: Missing RPM or Front Wheel Speed (RPM)"
+        slip_events = []
+        for i in range(len(df)):
+            delta = rpm_col.iloc[i] - wheels_col.iloc[i]
+            if delta > 600:
+                slip_events.append((i, delta))
+        return f"✅ Detected {len(slip_events)} forward clutch slip events." if slip_events else "✅ No forward clutch slip detected."
 
-    st.markdown("## 📋 Diagnostic Results")
-    for func in diagnostic_functions:
-        try:
-            result = func(df)
-            if result:
-                st.subheader(f"🔍 {func.__name__.replace('_', ' ').title()}")
-                for r in result:
-                    st.write(f"✅ {r}")
-            else:
-                st.info(f"⚠️ {func.__name__.replace('_', ' ').title()}: No issues detected.")
-        except Exception as e:
-            st.error(f"❌ {func.__name__} failed: {e}")
+    # Valve body behavior check (line pressure fluctuation)
+    def detect_valve_body_behavior(df):
+        pressure = safe_col(df, pid_map["line_pressure"])
+        if pressure is None:
+            return "❌ Error: Missing 'Line Pressure'"
+        abnormal = any(abs(pressure.diff().fillna(0)) > 100)
+        return "✅ Abnormal valve body behavior detected." if abnormal else "✅ No valve body issues detected."
+
+    # Lock-up clutch slip detection
+    def detect_lockup_clutch(df):
+        duty = safe_col(df, pid_map["lockup_duty"])
+        if duty is None:
+            return "❌ Error: Missing 'Lock Up Duty Ratio'"
+        spikes = (duty.diff().fillna(0).abs() > 15).sum()
+        return f"✅ {spikes} potential lock-up clutch anomalies." if spikes else "✅ No lock-up clutch anomalies."
+
+    # Run all diagnostics
+    st.subheader("📋 Diagnostic Results")
+    results.append(detect_torque_converter_judder(df))
+    results.append(detect_forward_clutch_slip(df))
+    results.append(detect_valve_body_behavior(df))
+    results.append(detect_lockup_clutch(df))
+
+    for r in results:
+        st.markdown(f"- {r}")
