@@ -76,7 +76,7 @@ def detect_solenoid_delay(df):
         if throttle.iloc[i] > 10 and gear_ratio.iloc[i-1] == gear_ratio.iloc[i]:
             events.append({"Type": "Solenoid Delay", "Time": i, "Details": "No gear ratio response after throttle"})
     return events
-    def detect_long_slip(df):
+def detect_long_slip(df):
     events = []
     primary = pd.to_numeric(df.get("Primary RPM"), errors="coerce")
     secondary = pd.to_numeric(df.get("Secondary RPM"), errors="coerce")
