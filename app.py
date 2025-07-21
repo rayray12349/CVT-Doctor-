@@ -16,8 +16,28 @@ column_rename_map = {
     "Turbine Revolution Speed": "Turbine RPM",
     "Actual Gear Ratio": "Gear Ratio",
     "Lock Up Duty Ratio": "TCC Lockup %",
-    "ATF Temp.": "ATF Temp (°F)"
+    "ATF Temp.": "ATF Temp (°F)",
+    "Front Wheel Speed": "Front Wheel Speed (RPM)"
 }
+
+cvt_type = st.selectbox("Select CVT Type", ["TR580", "TR690"])
+
+def detect_forward_clutch_slip(df, cvt_type):
+    events = []
+    eng_rpm = pd.to_numeric(df.get("Engine RPM"), errors="coerce")
+    if cvt_type == "TR690":
+        wheel_rpm = pd.to_numeric(df.get("Front Wheel Speed (RPM)"), errors="coerce")
+    else:
+        wheel_rpm = pd.to_numeric(df.get("Primary RPM"), errors="coerce")
+
+    for i in range(len(df)):
+        if eng_rpm.iloc[i] > 1200 and abs(eng_rpm.iloc[i] - wheel_rpm.iloc[i]) > 600:
+            events.append({
+                'Type': 'Forward Clutch Slip',
+                'Time': i,
+                'Details': f'RPM delta exceeds 600 ({eng_rpm.iloc[i]} vs {wheel_rpm.iloc[i]})'
+            })
+    return events
 
 def detect_micro_slip(df):
     events = []
@@ -25,12 +45,13 @@ def detect_micro_slip(df):
     gear_ratio = pd.to_numeric(df.get("Gear Ratio"), errors="coerce")
     primary_rpm = pd.to_numeric(df.get("Primary RPM"), errors="coerce")
     secondary_rpm = pd.to_numeric(df.get("Secondary RPM"), errors="coerce")
-    rolling_throttle_std = throttle.rolling(10, min_periods=1).std()
+    throttle_std = throttle.rolling(10, min_periods=1).std()
     primary_fluct = primary_rpm.diff().abs().rolling(5).mean()
     secondary_fluct = secondary_rpm.diff().abs().rolling(5).mean()
     ratio_fluct = gear_ratio.diff().abs().rolling(5).mean()
+
     for i in range(len(df)):
-        if (rolling_throttle_std.iloc[i] < 1.5 and
+        if (throttle_std.iloc[i] < 1.5 and
             ((primary_fluct.iloc[i] > 50) or (secondary_fluct.iloc[i] > 50)) and
             ratio_fluct.iloc[i] > 0.02):
             events.append({
@@ -40,100 +61,11 @@ def detect_micro_slip(df):
             })
     return events
 
-def detect_short_slip(df):
-    events = []
-    ratio = pd.to_numeric(df.get("Gear Ratio"), errors="coerce")
-    for i in range(3, len(df)):
-        if abs(ratio.iloc[i] - ratio.iloc[i-3]) > 0.2:
-            events.append({
-                'Type': 'TSB Short Slip',
-                'Time': i,
-                'Details': 'Gear Ratio changed rapidly over short duration'
-            })
-    return events
-
-def detect_long_slip(df):
-    events = []
-    ratio = pd.to_numeric(df.get("Gear Ratio"), errors="coerce")
-    for i in range(30, len(df)):
-        if ratio.iloc[i-30:i].std() > 0.1:
-            events.append({
-                'Type': 'TSB Long Slip',
-                'Time': i,
-                'Details': 'Sustained variation in Gear Ratio over time'
-            })
-    return events
-
-def detect_forward_clutch_shock(df):
-    events = []
-    eng = pd.to_numeric(df.get("Engine RPM"), errors="coerce")
-    pri = pd.to_numeric(df.get("Primary RPM"), errors="coerce")
-    if eng is None or pri is None:
-        return events
-    for i in range(1, len(df)):
-        if eng.iloc[i] - pri.iloc[i] > 800:
-            events.append({
-                'Type': 'Forward Clutch Slip Shock',
-                'Time': i,
-                'Details': 'Engine RPM significantly exceeded Primary RPM'
-            })
-    return events
-
-def detect_lockup_shock(df):
-    events = []
-    lock = pd.to_numeric(df.get("TCC Lockup %"), errors="coerce")
-    turb = pd.to_numeric(df.get("Turbine RPM"), errors="coerce")
-    eng = pd.to_numeric(df.get("Engine RPM"), errors="coerce")
-    for i in range(1, len(df)):
-        if lock.iloc[i] > 85 and abs(turb.iloc[i] - eng.iloc[i]) > 300:
-            events.append({
-                'Type': 'Lock-Up Engagement Shock',
-                'Time': i,
-                'Details': 'High Lockup with Turbine vs Engine RPM mismatch'
-            })
-    return events
-
-def detect_shift_up_shock(df):
-    events = []
-    throttle = pd.to_numeric(df.get("Throttle %"), errors="coerce")
-    sec_rpm = pd.to_numeric(df.get("Secondary RPM"), errors="coerce")
-    ratio = pd.to_numeric(df.get("Gear Ratio"), errors="coerce")
-    for i in range(1, len(df)):
-        if throttle.iloc[i] > 30 and ratio.diff().iloc[i] > 0.05 and sec_rpm.diff().iloc[i] < -150:
-            events.append({
-                'Type': 'Shift-Up Shock',
-                'Time': i,
-                'Details': 'Abrupt change during throttle and gear change'
-            })
-    return events
-
-def detect_up_duty_fault(df):
-    events = []
-    up_duty = pd.to_numeric(df.get("Primary UP Duty"), errors="coerce")
-    eng_rpm = pd.to_numeric(df.get("Engine RPM"), errors="coerce")
-    for i in range(3, len(df)):
-        window = up_duty.iloc[i-3:i+1]
-        if window.std() > 15 and eng_rpm.iloc[i] > 2000:
-            events.append({
-                'Type': 'Primary UP Duty Control Fault',
-                'Time': i,
-                'Details': 'Irregular waveform in Primary UP Duty'
-            })
-    return events
-
-def aggregate_all_tsb(df):
+def aggregate_all_tsb(df, cvt_type):
     all_events = []
-    for func in [
-        detect_micro_slip,
-        detect_short_slip,
-        detect_long_slip,
-        detect_forward_clutch_shock,
-        detect_lockup_shock,
-        detect_shift_up_shock,
-        detect_up_duty_fault
-    ]:
-        all_events.extend(func(df))
-    return sorted(all_events, key=lambda x: x["Time"])
+    all_events += detect_forward_clutch_slip(df, cvt_type)
+    all_events += detect_micro_slip(df)
+    return sorted(all_events, key=lambda x: x["Time"])[:100]
 
 uploaded_file = st.file_uploader("📤 Upload Subaru CVT CSV Log", type=["csv"])
 if uploaded_file:
@@ -143,7 +75,7 @@ if uploaded_file:
     df.index = range(len(df))
     st.success("✅ File loaded and columns mapped.")
 
-    events = aggregate_all_tsb(df)
+    events = aggregate_all_tsb(df, cvt_type)
 
     if events:
         st.subheader("⚠️ TSB-Based Diagnostic Events")
@@ -167,6 +99,6 @@ if uploaded_file:
             buffer.seek(0)
             st.download_button("📥 Download Report PDF", buffer, file_name="tsb_cvt_report.pdf")
     else:
-        st.success("✅ No Subaru-defined TSB faults detected.")
+        st.success("✅ No TSB faults detected.")
 else:
     st.info("Please upload a valid Subaru CVT CSV export.")
