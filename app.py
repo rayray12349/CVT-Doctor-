@@ -89,3 +89,40 @@ def aggregate_all_tsb(df):
     ]:
         all_events.extend(func(df))
     return sorted(all_events, key=lambda x: x["Time"])
+uploaded_file = st.file_uploader("📤 Upload Subaru CVT CSV Log", type=["csv"])
+if uploaded_file:
+    raw = uploaded_file.read().decode("ISO-8859-1").splitlines()
+    df = pd.read_csv(BytesIO('\n'.join(raw[8:]).encode("utf-8")))
+    df.rename(columns=column_rename_map, inplace=True)
+    df.index = range(len(df))
+    st.success("✅ File loaded and columns mapped.")
+
+    events = aggregate_all_tsb(df)
+
+    if events:
+        st.subheader("⚠️ TSB-Based Diagnostic Events")
+        for ev in events:
+            st.markdown(f"**{ev['Time']} - {ev['Type']}**: {ev['Details']}")
+            st.pyplot(ev['Graph'])
+
+        # PDF Export
+        if st.button("📄 Export TSB PDF Report"):
+            buffer = BytesIO()
+            c = canvas.Canvas(buffer, pagesize=letter)
+            c.setFont("Helvetica", 12)
+            c.drawString(30, 750, "CVT Doctor Pro – Subaru TSB Diagnostic Report")
+            c.drawString(30, 735, f"Detected Issues: {len(events)}")
+            y = 715
+            for ev in events:
+                c.drawString(30, y, f"{ev['Time']}: {ev['Type']} – {ev['Details']}")
+                y -= 15
+                if y < 40:
+                    c.showPage()
+                    y = 750
+            c.save()
+            buffer.seek(0)
+            st.download_button("📥 Download Report PDF", buffer, file_name="tsb_cvt_report.pdf")
+    else:
+        st.success("✅ No Subaru-defined TSB faults detected.")
+else:
+    st.info("Please upload a valid Subaru CVT CSV export.")
