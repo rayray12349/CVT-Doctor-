@@ -1,7 +1,6 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
 from io import BytesIO
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import letter
@@ -20,17 +19,6 @@ column_rename_map = {
     "ATF Temp.": "ATF Temp (°F)"
 }
 
-def plot_event(df, ycols, label, idx, window=30):
-    fig, ax = plt.subplots()
-    window = max(10, window)
-    slc = df.iloc[max(idx-window,0):min(idx+window,len(df))]
-    for col in ycols:
-        if col in slc.columns:
-            ax.plot(slc.index, pd.to_numeric(slc[col], errors="coerce"), label=col)
-    ax.set_title(f"{label} Around Index {idx}")
-    ax.legend()
-    return fig
-
 def detect_micro_slip(df):
     events = []
     throttle = pd.to_numeric(df.get("Throttle %"), errors="coerce")
@@ -48,8 +36,7 @@ def detect_micro_slip(df):
             events.append({
                 'Type': 'TSB Micro-Slip',
                 'Time': i,
-                'Details': 'Fluctuating ratio & RPM under steady throttle',
-                'Graph': plot_event(df, ["Gear Ratio", "Throttle %", "Primary RPM", "Secondary RPM"], "TSB Micro-Slip", i)
+                'Details': 'Fluctuating ratio & RPM under steady throttle'
             })
     return events
 
@@ -61,8 +48,7 @@ def detect_short_slip(df):
             events.append({
                 'Type': 'TSB Short Slip',
                 'Time': i,
-                'Details': 'Gear Ratio changed rapidly over short duration',
-                'Graph': plot_event(df, ["Gear Ratio"], "TSB Short Slip", i)
+                'Details': 'Gear Ratio changed rapidly over short duration'
             })
     return events
 
@@ -74,8 +60,7 @@ def detect_long_slip(df):
             events.append({
                 'Type': 'TSB Long Slip',
                 'Time': i,
-                'Details': 'Sustained variation in Gear Ratio over time',
-                'Graph': plot_event(df, ["Gear Ratio"], "TSB Long Slip", i)
+                'Details': 'Sustained variation in Gear Ratio over time'
             })
     return events
 
@@ -90,8 +75,7 @@ def detect_forward_clutch_shock(df):
             events.append({
                 'Type': 'Forward Clutch Slip Shock',
                 'Time': i,
-                'Details': 'Engine RPM significantly exceeded Primary RPM',
-                'Graph': plot_event(df, ["Engine RPM", "Primary RPM"], "Forward Clutch Slip Shock", i)
+                'Details': 'Engine RPM significantly exceeded Primary RPM'
             })
     return events
 
@@ -105,8 +89,7 @@ def detect_lockup_shock(df):
             events.append({
                 'Type': 'Lock-Up Engagement Shock',
                 'Time': i,
-                'Details': 'High Lockup with Turbine vs Engine RPM mismatch',
-                'Graph': plot_event(df, ["TCC Lockup %", "Turbine RPM", "Engine RPM"], "Lock-Up Shock", i)
+                'Details': 'High Lockup with Turbine vs Engine RPM mismatch'
             })
     return events
 
@@ -120,8 +103,7 @@ def detect_shift_up_shock(df):
             events.append({
                 'Type': 'Shift-Up Shock',
                 'Time': i,
-                'Details': 'Abrupt change during throttle and gear change',
-                'Graph': plot_event(df, ["Throttle %", "Secondary RPM", "Gear Ratio"], "Shift-Up Shock", i)
+                'Details': 'Abrupt change during throttle and gear change'
             })
     return events
 
@@ -135,8 +117,7 @@ def detect_up_duty_fault(df):
             events.append({
                 'Type': 'Primary UP Duty Control Fault',
                 'Time': i,
-                'Details': 'Irregular waveform in Primary UP Duty',
-                'Graph': plot_event(df, ["Primary UP Duty", "Gear Ratio", "Engine RPM"], "UP Duty Fault", i)
+                'Details': 'Irregular waveform in Primary UP Duty'
             })
     return events
 
@@ -166,12 +147,8 @@ if uploaded_file:
 
     if events:
         st.subheader("⚠️ TSB-Based Diagnostic Events")
-        max_display = 20
-        for i, ev in enumerate(events[:max_display]):
-            with st.expander(f"{ev['Time']} - {ev['Type']}"):
-                st.markdown(f"**Details**: {ev['Details']}")
-                if st.button(f"Show Graph {i+1}", key=f"graph_{i}"):
-                    st.pyplot(ev['Graph'])
+        for ev in events:
+            st.markdown(f"**{ev['Time']} - {ev['Type']}**: {ev['Details']}")
 
         if st.button("📄 Export TSB PDF Report"):
             buffer = BytesIO()
