@@ -94,3 +94,47 @@ def detect_short_slip(df):
         if all((slip.iloc[i-j] > 500 and slip.iloc[i-j] < 800) for j in range(3)):
             events.append({"Type": "Short Slip", "Time": i, "Details": "3-frame slip between 500–800 RPM"})
     return events
+def aggregate_all_tsb(df, cvt_type):
+    all_events = []
+    if cvt_type == "TR690":
+        all_events += detect_forward_clutch_slip(df)
+    all_events += detect_micro_slip(df)
+    all_events += detect_judder(df)
+    all_events += detect_lockup_issue(df)
+    all_events += detect_solenoid_delay(df)
+    all_events += detect_long_slip(df)
+    all_events += detect_short_slip(df)
+    return sorted(all_events, key=lambda x: x["Time"])[:100]
+
+uploaded_file = st.file_uploader("📤 Upload CVT CSV File", type=["csv"])
+if uploaded_file:
+    raw = uploaded_file.read().decode("ISO-8859-1").splitlines()
+    df = pd.read_csv(BytesIO('\n'.join(raw[8:]).encode("utf-8")))
+    df.rename(columns=column_rename_map, inplace=True)
+    df.index = range(len(df))
+    st.success("✅ File loaded.")
+
+    events = aggregate_all_tsb(df, cvt_type)
+    if events:
+        st.subheader("⚠️ Detected Events (TSB-Based)")
+        for e in events:
+            st.markdown(f"**{e['Time']} - {e['Type']}**: {e['Details']}")
+                    if st.button("📄 Export PDF Report"):
+            buffer = BytesIO()
+            c = canvas.Canvas(buffer, pagesize=letter)
+            c.setFont("Helvetica", 12)
+            c.drawString(30, 750, "CVT Doctor Pro – TSB Report")
+            y = 730
+            for ev in events:
+                c.drawString(30, y, f"{ev['Time']} – {ev['Type']} – {ev['Details']}")
+                y -= 15
+                if y < 40:
+                    c.showPage()
+                    y = 750
+            c.save()
+            buffer.seek(0)
+            st.download_button("📥 Download PDF", buffer, file_name="tsb_report.pdf")
+    else:
+        st.success("✅ No TSB fault patterns detected.")
+else:
+    st.info("Please upload a valid Subaru CVT data file.")
