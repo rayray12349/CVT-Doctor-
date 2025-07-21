@@ -52,6 +52,54 @@ def detect_micro_slip(df):
                 'Graph': plot_event(df, ["Gear Ratio", "Throttle %", "Primary RPM", "Secondary RPM"], "TSB Micro-Slip", i)
             })
     return events
+
+def detect_short_slip(df):
+    events = []
+    ratio = pd.to_numeric(df.get("Gear Ratio"), errors="coerce")
+    for i in range(3, len(df)):
+        if abs(ratio.iloc[i] - ratio.iloc[i-3]) > 0.2:
+            events.append({
+                'Type': 'TSB Short Slip',
+                'Time': i,
+                'Details': 'Gear Ratio changed rapidly over short duration',
+                'Graph': plot_event(df, ["Gear Ratio"], "TSB Short Slip", i)
+            })
+    return events
+
+def detect_long_slip(df):
+    events = []
+    ratio = pd.to_numeric(df.get("Gear Ratio"), errors="coerce")
+    for i in range(30, len(df)):
+        if ratio.iloc[i-30:i].std() > 0.1:
+            events.append({
+                'Type': 'TSB Long Slip',
+                'Time': i,
+                'Details': 'Sustained variation in Gear Ratio over time',
+                'Graph': plot_event(df, ["Gear Ratio"], "TSB Long Slip", i)
+            })
+    return events
+
+def detect_forward_clutch_shock(df):
+    events = []
+    eng = pd.to_numeric(df.get("Engine RPM"), errors="coerce")
+    pri = pd.to_numeric(df.get("Primary RPM"), errors="coerce")
+    if eng is None or pri is None:
+        return events
+    for i in range(1, len(df)):
+        if eng.iloc[i] - pri.iloc[i] > 800:
+            events.append({
+                'Type': 'Forward Clutch Slip Shock',
+                'Time': i,
+                'Details': 'Engine RPM significantly exceeded Primary RPM',
+                'Graph': plot_event(df, ["Engine RPM", "Primary RPM"], "Forward Clutch Slip Shock", i)
+            })
+    return events
+
+def detect_lockup_shock(df):
+    events = []
+    lock = pd.to_numeric(df.get("TCC Lockup %"), errors="coerce")
+    turb = pd.to_numeric(df.get("Turbine RPM"), errors="coerce")
+    eng = pd.to_numeric(df.get("Engine RPM"), errors="coerce")
     for i in range(1, len(df)):
         if lock.iloc[i] > 85 and abs(turb.iloc[i] - eng.iloc[i]) > 300:
             events.append({
