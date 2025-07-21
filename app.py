@@ -49,7 +49,7 @@ def detect_micro_slip(df):
             ratio_fluct.iloc[i] > 0.02):
             events.append({"Type": "Micro Slip", "Time": i, "Details": "Fluctuating RPM/ratio under steady throttle"})
     return events
-    def detect_judder(df):
+def detect_judder(df):
     events = []
     gear_ratio = pd.to_numeric(df.get("Gear Ratio"), errors="coerce")
     judder_score = gear_ratio.diff().rolling(5).std()
