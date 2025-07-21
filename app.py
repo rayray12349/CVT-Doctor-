@@ -8,7 +8,7 @@ uploaded_file = st.file_uploader("📤 Upload Subaru CVT CSV Log", type=["csv"])
 if uploaded_file is not None:
     # Skip metadata lines and read clean column headers
     try:
-        df = pd.read_csv(uploaded_file, skiprows=8)
+        df = pd.read_csv(uploaded_file, skiprows=8, encoding="ISO-8859-1")
     except Exception as e:
         st.error(f"❌ CSV read error: {e}")
         st.stop()
