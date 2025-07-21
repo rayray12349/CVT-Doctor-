@@ -26,7 +26,13 @@ def detect_forward_clutch_slip(df, cvt_type):
     events = []
     eng_rpm = pd.to_numeric(df.get("Engine RPM"), errors="coerce")
     if cvt_type == "TR690":
-        wheel_rpm = pd.to_numeric(df.get("Front Wheel Speed (RPM)"), errors="coerce")
+        wheel_col = "Front Wheel Speed (RPM)"
+        if wheel_col not in df.columns:
+            st.error("❌ Missing 'Front Wheel Speed (RPM)' column for TR690.")
+            return []
+        wheel_rpm = pd.to_numeric(df[wheel_col], errors="coerce")
+        if wheel_rpm.dropna().max() < 50:
+            st.warning("⚠️ 'Front Wheel Speed (RPM)' appears to be mostly zeros or invalid.")
     else:
         wheel_rpm = pd.to_numeric(df.get("Primary RPM"), errors="coerce")
 
@@ -74,6 +80,10 @@ if uploaded_file:
     df.rename(columns=column_rename_map, inplace=True)
     df.index = range(len(df))
     st.success("✅ File loaded and columns mapped.")
+
+    st.markdown("**Preview: Front Wheel Speed (RPM)**")
+    if "Front Wheel Speed (RPM)" in df.columns:
+        st.line_chart(pd.to_numeric(df["Front Wheel Speed (RPM)"], errors="coerce").fillna(0).head(300))
 
     events = aggregate_all_tsb(df, cvt_type)
 
