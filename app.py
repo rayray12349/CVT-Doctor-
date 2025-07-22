@@ -29,6 +29,12 @@ def get_throttle(df):
         throttle = df.get('Throttle Opening Angle')
     return throttle
 
+def get_speed(df):
+    speed = df.get('Front Wheel Speed')
+    if speed is None:
+        speed = df.get('Vehicle Speed')
+    return speed
+
 def is_throttle_stable(throttle_series, threshold=2, window=1.0, rate=10):
     window_size = int(window * rate)
     rolling_std = throttle_series.rolling(window=window_size).std()
@@ -61,11 +67,17 @@ def detect_micro_slip(df, rate=10):
 def detect_short_time_slip(df):
     gear = df.get('Actual Gear Ratio')
     throttle = get_throttle(df)
-    if gear is None or throttle is None:
+    primary = df.get('Primary Rev Speed')
+    secondary = df.get('Secondary Rev Speed')
+
+    if any(v is None for v in [gear, throttle, primary, secondary]):
         return False
+
     active = throttle > 1.0
-    spikes = (gear.diff().abs() > 0.1) & active
-    return spikes.any()
+    gear_spike = gear.diff().abs() > 0.1
+    rpm_fluct = primary.diff().abs().combine(secondary.diff().abs(), max) > 100
+    valid_range = gear > 1.5
+    return (gear_spike & rpm_fluct & active & valid_range).any()
 
 def detect_long_time_slip(df):
     duty = df.get('Primary UP Duty')
@@ -125,13 +137,17 @@ def detect_chain_slip(df):
     secondary = df.get('Secondary Rev Speed')
     gear = df.get('Actual Gear Ratio')
     throttle = get_throttle(df)
+    speed = get_speed(df)
 
     if any(v is None for v in [engine, primary, secondary, gear, throttle]):
         return False
 
-    active = throttle > 1.0
-    overlap = (engine.diff().abs() < 50) & (primary.diff().abs() < 50) & (secondary.diff().abs() < 50) & active
-    return overlap.rolling(10).sum().max() > 5
+    throttle_active = throttle > 1.0
+    gear_valid = gear > 1.5
+    speed_valid = speed > 3 if speed is not None else True
+
+    overlap = (engine.diff().abs() < 50) & (primary.diff().abs() < 50) & (secondary.diff().abs() < 50)
+    return (overlap & throttle_active & gear_valid & speed_valid).rolling(10).sum().max() > 5
 
 # ------------------- Streamlit App ------------------- #
 
@@ -151,18 +167,20 @@ if uploaded_file:
     st.subheader("📊 Diagnostic Summary")
 
     results = {
-        "Chain Slip": detect_chain_slip(df),
-        "Micro Slip": detect_micro_slip(df),
-        "Short-Time Slip": detect_short_time_slip(df),
-        "Long-Time Slip": detect_long_time_slip(df),
-        "Forward Clutch Slip": detect_forward_clutch_slip(df, tr690=is_tr690),
-        "Lock-Up Judder": detect_lockup_judder(df),
-        "Torque Converter Judder": detect_torque_converter_judder(df),
+        "Chain Slip": (detect_chain_slip(df), "Replace CVT & TCM if confirmed via SSM; submit QMR."),
+        "Micro Slip": (detect_micro_slip(df), "Replace CVT after confirming persistent fluctuation."),
+        "Short-Time Slip": (detect_short_time_slip(df), "Reprogram TCM; replace CVT if slip persists."),
+        "Long-Time Slip": (detect_long_time_slip(df), "Reprogram TCM; monitor for progressive wear."),
+        "Forward Clutch Slip": (detect_forward_clutch_slip(df, tr690=is_tr690), "Reprogram TCM; replace valve body or CVT if needed."),
+        "Lock-Up Judder": (detect_lockup_judder(df), "Reprogram TCM; verify ATF condition; replace converter if needed."),
+        "Torque Converter Judder": (detect_torque_converter_judder(df), "Replace torque converter; inspect pump & solenoid function."),
     }
 
-    for label, detected in results.items():
-        st.markdown(f"- **{label}**: {'❌ Not Detected' if not detected else '⚠️ Detected — Review Required'}")
+    for label, (detected, recommendation) in results.items():
+        if detected:
+            st.markdown(f"- **{label}**: ⚠️ Detected — **Review Required**  \n  _Recommendation: {recommendation}_")
+        else:
+            st.markdown(f"- **{label}**: ❌ Not Detected")
 
     st.divider()
-
     st.markdown("🔁 [TSB 16-132-20R Reference](https://static.nhtsa.gov/odi/tsbs/2022/MC-10226904-0001.pdf)")
