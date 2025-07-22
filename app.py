@@ -47,30 +47,33 @@ def detect_micro_slip(df, rate=10):
     prim = df.get('Primary Rev Speed')
     sec = df.get('Secondary Rev Speed')
     throttle = get_throttle(df)
+    speed = get_speed(df)
 
-    if any(v is None for v in [gear, prim, sec, throttle]):
+    if any(v is None for v in [gear, prim, sec, throttle, speed]):
+        return False
+    if (speed <= 10).all():
         return False
 
     throttle_mask = throttle > 1.0
     throttle_stable = is_throttle_stable(throttle, rate=rate)
 
-    gear_diff = gear.diff().abs()
-    rpm_diff = prim.diff().abs().combine(sec.diff().abs(), max)
+    gear_ptp = gear.rolling(rate).apply(lambda x: x.max() - x.min()) > 0.02
+    rpm_ptp = prim.rolling(rate).apply(lambda x: x.max() - x.min()) > 50
+    sec_ptp = sec.rolling(rate).apply(lambda x: x.max() - x.min()) > 50
 
-    gear_fluct = (gear_diff > 0.02)
-    rpm_fluct = (rpm_diff > 50)
-
-    combined = gear_fluct & rpm_fluct & throttle_stable & throttle_mask
-    freq = combined.rolling(rate).sum()
-    return (freq >= 3).any()
+    rpm_fluct = rpm_ptp | sec_ptp
+    return (gear_ptp & rpm_fluct & throttle_mask & throttle_stable).any()
 
 def detect_short_time_slip(df):
     gear = df.get('Actual Gear Ratio')
     throttle = get_throttle(df)
     primary = df.get('Primary Rev Speed')
     secondary = df.get('Secondary Rev Speed')
+    speed = get_speed(df)
 
-    if any(v is None for v in [gear, throttle, primary, secondary]):
+    if any(v is None for v in [gear, throttle, primary, secondary, speed]):
+        return False
+    if (speed <= 10).all():
         return False
 
     active = throttle > 1.0
@@ -79,19 +82,22 @@ def detect_short_time_slip(df):
     valid_range = gear > 1.5
     return (gear_spike & rpm_fluct & active & valid_range).any()
 
-def detect_long_time_slip(df):
+def simulate_long_time_slip(df):
     duty = df.get('Primary UP Duty')
-    pulley = df.get('Actual Pulley Ratio')
     gear = df.get('Actual Gear Ratio')
     prim = df.get('Primary Rev Speed')
     sec = df.get('Secondary Rev Speed')
     throttle = get_throttle(df)
+    speed = get_speed(df)
 
-    if any(v is None for v in [duty, pulley, gear, prim, sec, throttle]):
+    if any(v is None for v in [duty, gear, prim, sec, throttle, speed]):
+        return False
+    if (speed <= 10).all():
         return False
 
+    gear_drop = gear.rolling(5).mean() < gear.mean()
     rpm_fluct = prim.diff().abs().combine(sec.diff().abs(), max) > 50
-    slip_condition = (duty > 90) & (pulley.rolling(5).mean() < pulley.mean()) & (throttle > 1.0)
+    slip_condition = (duty > 90) & gear_drop & (throttle > 1.0)
     return (slip_condition & rpm_fluct).any()
 
 def detect_forward_clutch_slip(df, tr690=True):
@@ -139,14 +145,13 @@ def detect_chain_slip(df):
     throttle = get_throttle(df)
     speed = get_speed(df)
 
-    if any(v is None for v in [engine, primary, secondary, gear, throttle]):
+    if any(v is None for v in [engine, primary, secondary, gear, throttle, speed]):
         return False
 
     throttle_active = throttle > 1.0
     gear_valid = gear > 1.5
-    speed_valid = speed > 5 if speed is not None else True
+    speed_valid = speed > 10
 
-    # Require meaningful RPM activity
     rpm_activity = (
         engine.diff().abs().rolling(10).mean() > 10
     ) & (
@@ -181,7 +186,7 @@ if uploaded_file:
         "Chain Slip": (detect_chain_slip(df), "Replace CVT & TCM if confirmed via SSM; submit QMR."),
         "Micro Slip": (detect_micro_slip(df), "Replace CVT after confirming persistent fluctuation."),
         "Short-Time Slip": (detect_short_time_slip(df), "Reprogram TCM; replace CVT if slip persists."),
-        "Long-Time Slip": (detect_long_time_slip(df), "Reprogram TCM; monitor for progressive wear."),
+        "Long-Time Slip": (simulate_long_time_slip(df), "Reprogram TCM; monitor for progressive wear. (Simulated — Actual Pulley Ratio not logged)"),
         "Forward Clutch Slip": (detect_forward_clutch_slip(df, tr690=is_tr690), "Reprogram TCM; replace valve body or CVT if needed."),
         "Lock-Up Judder": (detect_lockup_judder(df), "Reprogram TCM; verify ATF condition; replace converter if needed."),
         "Torque Converter Judder": (detect_torque_converter_judder(df), "Replace torque converter; inspect pump & solenoid function."),
