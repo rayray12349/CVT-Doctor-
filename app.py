@@ -30,7 +30,12 @@ def get_throttle(df):
         return None
 
 def get_speed(df):
-    return df.get('Front Wheel Speed') or df.get('Vehicle Speed')
+    if 'Front Wheel Speed' in df.columns:
+        return df['Front Wheel Speed']
+    elif 'Vehicle Speed' in df.columns:
+        return df['Vehicle Speed']
+    else:
+        return None
 
 def is_throttle_stable(throttle, threshold=2, window=1.0, rate=10):
     rolling_std = throttle.rolling(int(window * rate)).std()
