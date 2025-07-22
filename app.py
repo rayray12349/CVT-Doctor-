@@ -13,9 +13,10 @@ def safe_float(x):
 
 @st.cache_data
 def load_csv(file):
-    df = pd.read_csv(file, skiprows=8)  # Skip metadata
-    df = df.applymap(safe_float)       # Convert everything safely
-    return df.dropna(axis=1, how='all')  # Drop empty columns
+    decoded = file.read().decode('utf-8', errors='ignore')  # Fix: Handle encoding issues
+    df = pd.read_csv(io.StringIO(decoded), skiprows=8)      # Skip metadata rows
+    df = df.applymap(safe_float)                            # Safely convert all values
+    return df.dropna(axis=1, how='all')                     # Drop fully empty columns
 
 def detect_tr690(df):
     return 'Front Wheel Speed (RPM)' in df.columns
@@ -44,7 +45,7 @@ def detect_micro_slip(df, rate=10):
     rpm_fluct = (rpm_diff > 50)
 
     combined = gear_fluct & rpm_fluct & throttle_stable
-    freq = combined.rolling(rate).sum()  # Count events in 1s
+    freq = combined.rolling(rate).sum()
     return (freq >= 3).any()
 
 def detect_short_time_slip(df):
