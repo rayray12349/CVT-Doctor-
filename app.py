@@ -3,8 +3,6 @@ import pandas as pd
 import numpy as np
 import io
 
-# ---------- Utility Functions ----------
-
 def safe_float(x):
     try:
         return float(x)
@@ -22,10 +20,10 @@ def detect_tr690(df):
     return 'Secondary Rev Speed' in df.columns and 'Front Wheel Speed' in df.columns
 
 def get_throttle(df):
-    return df.get('Accel. Opening Angle') or df.get('Throttle Opening Angle')
+    return df.get('Accel. Opening Angle').combine_first(df.get('Throttle Opening Angle'))
 
 def get_speed(df):
-    return df.get('Front Wheel Speed') or df.get('Vehicle Speed')
+    return df.get('Front Wheel Speed').combine_first(df.get('Vehicle Speed'))
 
 def get_time(df):
     try:
@@ -41,8 +39,6 @@ def get_peak_time(events, time_series):
         peak_index = events[events].rolling(10).sum().idxmax()
         return float(time_series.iloc[peak_index]) if peak_index < len(time_series) else None
     return None
-
-# ---------- Detection Functions ----------
 
 def detect_micro_slip(df, time_series):
     gear = df.get('Actual Gear Ratio')
