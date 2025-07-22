@@ -22,7 +22,12 @@ def detect_tr690(df):
     return 'Secondary Rev Speed' in df.columns and 'Front Wheel Speed' in df.columns
 
 def get_throttle(df):
-    return df.get('Accel. Opening Angle') or df.get('Throttle Opening Angle')
+    if 'Accel. Opening Angle' in df.columns:
+        return df['Accel. Opening Angle']
+    elif 'Throttle Opening Angle' in df.columns:
+        return df['Throttle Opening Angle']
+    else:
+        return None
 
 def get_speed(df):
     return df.get('Front Wheel Speed') or df.get('Vehicle Speed')
