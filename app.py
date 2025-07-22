@@ -13,18 +13,27 @@ def safe_float(x):
 
 @st.cache_data
 def load_csv(file):
-    decoded = file.read().decode('utf-8', errors='ignore')  # Fix: Handle encoding issues
-    df = pd.read_csv(io.StringIO(decoded), skiprows=8)      # Skip metadata rows
-    df = df.applymap(safe_float)                            # Safely convert all values
-    return df.dropna(axis=1, how='all')                     # Drop fully empty columns
+    decoded = file.read().decode('utf-8', errors='ignore')
+    df = pd.read_csv(io.StringIO(decoded), skiprows=8)
+    df = df.applymap(safe_float)
+    return df.dropna(axis=1, how='all')
 
 def detect_tr690(df):
-    return 'Front Wheel Speed (RPM)' in df.columns
+    # New logic: TR690 if both Secondary Rev Speed and Front Wheel Speed (MPH) exist and RPMs are high
+    has_secondary = 'Secondary Rev Speed' in df.columns
+    has_front_wheel_speed = 'Front Wheel Speed' in df.columns
+    return has_secondary and has_front_wheel_speed
 
 def is_throttle_stable(throttle_series, threshold=2, window=1.0, rate=10):
     window_size = int(window * rate)
     rolling_std = throttle_series.rolling(window=window_size).std()
     return (rolling_std < threshold)
+
+def throttle_active(df, min_val=1.0):
+    throttle = df.get('Accel. Opening Angle') or df.get('Throttle Opening Angle')
+    if throttle is None:
+        return pd.Series(False, index=df.index)
+    return throttle > min_val
 
 # ------------------- Detection Logic ------------------- #
 
@@ -32,27 +41,31 @@ def detect_micro_slip(df, rate=10):
     gear = df.get('Actual Gear Ratio')
     prim = df.get('Primary Rev Speed')
     sec = df.get('Secondary Rev Speed')
-    throttle = df.get('Throttle Opening Angle')
+    throttle = df.get('Accel. Opening Angle') or df.get('Throttle Opening Angle')
 
     if any(v is None for v in [gear, prim, sec, throttle]):
         return False
 
+    throttle_mask = throttle > 1.0
     throttle_stable = is_throttle_stable(throttle, rate=rate)
+
     gear_diff = gear.diff().abs()
     rpm_diff = prim.diff().abs().combine(sec.diff().abs(), max)
 
     gear_fluct = (gear_diff > 0.02)
     rpm_fluct = (rpm_diff > 50)
 
-    combined = gear_fluct & rpm_fluct & throttle_stable
+    combined = gear_fluct & rpm_fluct & throttle_stable & throttle_mask
     freq = combined.rolling(rate).sum()
     return (freq >= 3).any()
 
 def detect_short_time_slip(df):
     gear = df.get('Actual Gear Ratio')
-    if gear is None:
+    throttle = df.get('Accel. Opening Angle') or df.get('Throttle Opening Angle')
+    if gear is None or throttle is None:
         return False
-    spikes = gear.diff(periods=1).abs() > 0.1
+    active = throttle > 1.0
+    spikes = (gear.diff().abs() > 0.1) & active
     return spikes.any()
 
 def detect_long_time_slip(df):
@@ -61,18 +74,19 @@ def detect_long_time_slip(df):
     gear = df.get('Actual Gear Ratio')
     prim = df.get('Primary Rev Speed')
     sec = df.get('Secondary Rev Speed')
+    throttle = df.get('Accel. Opening Angle') or df.get('Throttle Opening Angle')
 
-    if any(v is None for v in [duty, pulley, gear, prim, sec]):
+    if any(v is None for v in [duty, pulley, gear, prim, sec, throttle]):
         return False
 
-    slip_condition = (duty > 90) & (pulley.rolling(5).mean() < pulley.mean())
     rpm_fluct = prim.diff().abs().combine(sec.diff().abs(), max) > 50
+    slip_condition = (duty > 90) & (pulley.rolling(5).mean() < pulley.mean()) & (throttle > 1.0)
     return (slip_condition & rpm_fluct).any()
 
 def detect_forward_clutch_slip(df, tr690=True):
     if tr690:
         upstream = df.get('Secondary Rev Speed')
-        downstream = df.get('Front Wheel Speed (RPM)')
+        downstream = df.get('Front Wheel Speed')  # TR690: RPM vs MPH is okay with flow trend mismatch
     else:
         upstream = df.get('Turbine Revolution Speed')
         downstream = df.get('Primary Rev Speed')
@@ -81,11 +95,11 @@ def detect_forward_clutch_slip(df, tr690=True):
         return False
 
     delta = upstream - downstream
-    flow_mismatch = delta.abs().rolling(10).mean() > 100
+    flow_mismatch = delta.abs().rolling(5).mean() > 75  # Lowered from 100
     return flow_mismatch.any()
 
 def detect_lockup_judder(df):
-    throttle = df.get('Throttle Opening Angle')
+    throttle = df.get('Accel. Opening Angle') or df.get('Throttle Opening Angle')
     primary = df.get('Primary Rev Speed')
     secondary = df.get('Secondary Rev Speed')
 
@@ -111,11 +125,13 @@ def detect_chain_slip(df):
     primary = df.get('Primary Rev Speed')
     secondary = df.get('Secondary Rev Speed')
     gear = df.get('Actual Gear Ratio')
+    throttle = df.get('Accel. Opening Angle') or df.get('Throttle Opening Angle')
 
-    if any(v is None for v in [engine, primary, secondary, gear]):
+    if any(v is None for v in [engine, primary, secondary, gear, throttle]):
         return False
 
-    overlap = (engine.diff().abs() < 50) & (primary.diff().abs() < 50) & (secondary.diff().abs() < 50)
+    active = throttle > 1.0
+    overlap = (engine.diff().abs() < 50) & (primary.diff().abs() < 50) & (secondary.diff().abs() < 50) & active
     return overlap.rolling(10).sum().max() > 5
 
 # ------------------- Streamlit App ------------------- #
