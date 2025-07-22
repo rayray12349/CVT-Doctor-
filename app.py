@@ -19,21 +19,20 @@ def load_csv(file):
     return df.dropna(axis=1, how='all')
 
 def detect_tr690(df):
-    # New logic: TR690 if both Secondary Rev Speed and Front Wheel Speed (MPH) exist and RPMs are high
     has_secondary = 'Secondary Rev Speed' in df.columns
     has_front_wheel_speed = 'Front Wheel Speed' in df.columns
     return has_secondary and has_front_wheel_speed
+
+def get_throttle(df):
+    throttle = df.get('Accel. Opening Angle')
+    if throttle is None:
+        throttle = df.get('Throttle Opening Angle')
+    return throttle
 
 def is_throttle_stable(throttle_series, threshold=2, window=1.0, rate=10):
     window_size = int(window * rate)
     rolling_std = throttle_series.rolling(window=window_size).std()
     return (rolling_std < threshold)
-
-def throttle_active(df, min_val=1.0):
-    throttle = df.get('Accel. Opening Angle') or df.get('Throttle Opening Angle')
-    if throttle is None:
-        return pd.Series(False, index=df.index)
-    return throttle > min_val
 
 # ------------------- Detection Logic ------------------- #
 
@@ -41,7 +40,7 @@ def detect_micro_slip(df, rate=10):
     gear = df.get('Actual Gear Ratio')
     prim = df.get('Primary Rev Speed')
     sec = df.get('Secondary Rev Speed')
-    throttle = df.get('Accel. Opening Angle') or df.get('Throttle Opening Angle')
+    throttle = get_throttle(df)
 
     if any(v is None for v in [gear, prim, sec, throttle]):
         return False
@@ -61,7 +60,7 @@ def detect_micro_slip(df, rate=10):
 
 def detect_short_time_slip(df):
     gear = df.get('Actual Gear Ratio')
-    throttle = df.get('Accel. Opening Angle') or df.get('Throttle Opening Angle')
+    throttle = get_throttle(df)
     if gear is None or throttle is None:
         return False
     active = throttle > 1.0
@@ -74,7 +73,7 @@ def detect_long_time_slip(df):
     gear = df.get('Actual Gear Ratio')
     prim = df.get('Primary Rev Speed')
     sec = df.get('Secondary Rev Speed')
-    throttle = df.get('Accel. Opening Angle') or df.get('Throttle Opening Angle')
+    throttle = get_throttle(df)
 
     if any(v is None for v in [duty, pulley, gear, prim, sec, throttle]):
         return False
@@ -86,7 +85,7 @@ def detect_long_time_slip(df):
 def detect_forward_clutch_slip(df, tr690=True):
     if tr690:
         upstream = df.get('Secondary Rev Speed')
-        downstream = df.get('Front Wheel Speed')  # TR690: RPM vs MPH is okay with flow trend mismatch
+        downstream = df.get('Front Wheel Speed')
     else:
         upstream = df.get('Turbine Revolution Speed')
         downstream = df.get('Primary Rev Speed')
@@ -95,11 +94,11 @@ def detect_forward_clutch_slip(df, tr690=True):
         return False
 
     delta = upstream - downstream
-    flow_mismatch = delta.abs().rolling(5).mean() > 75  # Lowered from 100
+    flow_mismatch = delta.abs().rolling(5).mean() > 75
     return flow_mismatch.any()
 
 def detect_lockup_judder(df):
-    throttle = df.get('Accel. Opening Angle') or df.get('Throttle Opening Angle')
+    throttle = get_throttle(df)
     primary = df.get('Primary Rev Speed')
     secondary = df.get('Secondary Rev Speed')
 
@@ -125,7 +124,7 @@ def detect_chain_slip(df):
     primary = df.get('Primary Rev Speed')
     secondary = df.get('Secondary Rev Speed')
     gear = df.get('Actual Gear Ratio')
-    throttle = df.get('Accel. Opening Angle') or df.get('Throttle Opening Angle')
+    throttle = get_throttle(df)
 
     if any(v is None for v in [engine, primary, secondary, gear, throttle]):
         return False
