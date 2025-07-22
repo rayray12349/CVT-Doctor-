@@ -1,143 +1,152 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
+import io
 
-st.set_page_config(page_title="CVT Doctor Pro", layout="wide")
-st.title("CVT Doctor Pro")
-st.markdown("Automated Subaru CVT TSB Diagnostics")
+# ---------------- Utility Functions ---------------- #
 
-# --- File uploader ---
-uploaded_file = st.file_uploader("Upload Subaru SSM4/BtSsm CSV file", type=["csv"])
-cvt_type = st.selectbox("Select CVT Type", ["TR580", "TR690"])
-
-# --- Safe float conversion ---
-def safe_float(val):
+def safe_float(x):
     try:
-        return float(str(val).replace(',', '').strip())
+        return float(x)
     except:
-        return None
+        return np.nan
 
-# --- CSV loader ---
+@st.cache_data
 def load_csv(file):
-    try:
-        return pd.read_csv(file, skiprows=8, encoding="utf-8", on_bad_lines="skip")
-    except:
-        return pd.read_csv(file, skiprows=8, encoding="ISO-8859-1", on_bad_lines="skip")
+    df = pd.read_csv(file, skiprows=8)  # Skip metadata
+    df = df.applymap(safe_float)       # Convert everything safely
+    return df.dropna(axis=1, how='all')  # Drop empty columns
 
-# --- Detection helpers ---
-def has_flow_mismatch(series1, series2, window=5, threshold=0.9):
-    corr = series1.rolling(window).corr(series2)
-    mismatch = (corr < threshold).sum()
-    return mismatch > 5
+def detect_tr690(df):
+    return 'Front Wheel Speed (RPM)' in df.columns
 
-def has_fluctuations(series, window=5, threshold=50):
-    diff = series.diff().rolling(window).std()
-    return (diff > threshold).sum() > 5
+def is_throttle_stable(throttle_series, threshold=2, window=1.0, rate=10):
+    window_size = int(window * rate)
+    rolling_std = throttle_series.rolling(window=window_size).std()
+    return (rolling_std < threshold)
 
-def stable_throttle(throttle, min_angle=10):
-    return throttle > min_angle
+# ------------------- Detection Logic ------------------- #
 
-# --- TSB Diagnostic Functions ---
+def detect_micro_slip(df, rate=10):
+    gear = df.get('Actual Gear Ratio')
+    prim = df.get('Primary Rev Speed')
+    sec = df.get('Secondary Rev Speed')
+    throttle = df.get('Throttle Opening Angle')
 
-def detect_chain_slip(df):
-    try:
-        ratio = df["Actual Gear Ratio"].apply(safe_float)
-        primary = df["Primary Rev Speed"].apply(safe_float)
-        secondary = df["Secondary Rev Speed"].apply(safe_float)
-        throttle = df["Throttle Opening Angle"].apply(safe_float)
-        cond = (ratio.notnull()) & (primary.notnull()) & (secondary.notnull()) & (throttle > 10)
-        if cond.sum() < 30:
-            return False
-        deviation = (primary / secondary - ratio).abs()
-        return (deviation > 0.2).sum() > 10
-    except:
+    if any(v is None for v in [gear, prim, sec, throttle]):
         return False
 
-def detect_micro_slip(df):
-    return detect_chain_slip(df)
+    throttle_stable = is_throttle_stable(throttle, rate=rate)
+    gear_diff = gear.diff().abs()
+    rpm_diff = prim.diff().abs().combine(sec.diff().abs(), max)
 
-def detect_short_slip(df):
-    return detect_chain_slip(df)
+    gear_fluct = (gear_diff > 0.02)
+    rpm_fluct = (rpm_diff > 50)
 
-def detect_long_slip(df):
-    return detect_chain_slip(df)
+    combined = gear_fluct & rpm_fluct & throttle_stable
+    freq = combined.rolling(rate).sum()  # Count events in 1s
+    return (freq >= 3).any()
 
-def detect_forward_clutch_slip(df):
-    if cvt_type != "TR690":
+def detect_short_time_slip(df):
+    gear = df.get('Actual Gear Ratio')
+    if gear is None:
         return False
-    try:
-        sec = df["Secondary Rev Speed"].apply(safe_float)
-        front = df["Front Wheel Speed (RPM)"].apply(safe_float)
-        throttle = df["Throttle Opening Angle"].apply(safe_float)
-        if sec.notnull().sum() < 30 or front.notnull().sum() < 30:
-            return False
-        cond = (throttle > 10) & sec.notnull() & front.notnull()
-        return has_flow_mismatch(sec[cond], front[cond])
-    except:
+    spikes = gear.diff(periods=1).abs() > 0.1
+    return spikes.any()
+
+def detect_long_time_slip(df):
+    duty = df.get('Primary UP Duty')
+    pulley = df.get('Actual Pulley Ratio')
+    gear = df.get('Actual Gear Ratio')
+    prim = df.get('Primary Rev Speed')
+    sec = df.get('Secondary Rev Speed')
+
+    if any(v is None for v in [duty, pulley, gear, prim, sec]):
         return False
 
-def detect_torque_converter_judder(df):
-    try:
-        primary = df["Primary Rev Speed"].apply(safe_float)
-        secondary = df["Secondary Rev Speed"].apply(safe_float)
-        throttle = df["Throttle Opening Angle"].apply(safe_float)
-        cond = (throttle > 10) & primary.notnull() & secondary.notnull()
-        return has_fluctuations(primary[cond] - secondary[cond])
-    except:
+    slip_condition = (duty > 90) & (pulley.rolling(5).mean() < pulley.mean())
+    rpm_fluct = prim.diff().abs().combine(sec.diff().abs(), max) > 50
+    return (slip_condition & rpm_fluct).any()
+
+def detect_forward_clutch_slip(df, tr690=True):
+    if tr690:
+        upstream = df.get('Secondary Rev Speed')
+        downstream = df.get('Front Wheel Speed (RPM)')
+    else:
+        upstream = df.get('Turbine Revolution Speed')
+        downstream = df.get('Primary Rev Speed')
+
+    if upstream is None or downstream is None:
         return False
+
+    delta = upstream - downstream
+    flow_mismatch = delta.abs().rolling(10).mean() > 100
+    return flow_mismatch.any()
 
 def detect_lockup_judder(df):
-    try:
-        primary = df["Primary Rev Speed"].apply(safe_float)
-        secondary = df["Secondary Rev Speed"].apply(safe_float)
-        duty = df["Lock Up Duty Ratio"].apply(safe_float)
-        throttle = df["Throttle Opening Angle"].apply(safe_float)
-        cond = (duty > 70) & (throttle > 10) & primary.notnull() & secondary.notnull()
-        return has_fluctuations(primary[cond] - secondary[cond])
-    except:
+    throttle = df.get('Throttle Opening Angle')
+    primary = df.get('Primary Rev Speed')
+    secondary = df.get('Secondary Rev Speed')
+
+    if throttle is None or primary is None or secondary is None:
         return False
 
-# --- Aggregator ---
-def analyze_all(df):
-    return {
-        "Chain Slip": detect_chain_slip(df),
-        "Micro Slip": detect_micro_slip(df),
-        "Short Slip": detect_short_slip(df),
-        "Long Slip": detect_long_slip(df),
-        "Forward Clutch Slip": detect_forward_clutch_slip(df),
-        "Torque Converter Judder": detect_torque_converter_judder(df),
-        "Lock-Up Judder": detect_lockup_judder(df)
-    }
+    rpm_fluct = primary.diff().abs().combine(secondary.diff().abs(), max) > 50
+    active = (throttle > 10) & rpm_fluct
+    return active.rolling(10).sum().max() > 5
 
-# --- Repair Recommendations ---
-def get_recommendations(detections):
-    recs = []
-    if detections["Chain Slip"]:
-        recs.append("⚠️ Check belt/pulley wear. May require CVT overhaul.")
-    if detections["Micro Slip"] or detections["Short Slip"] or detections["Long Slip"]:
-        recs.append("⚠️ Inspect line pressure solenoids and clutch packs.")
-    if detections["Forward Clutch Slip"]:
-        recs.append("⚠️ Verify TR690 forward clutch operation. Check valve body.")
-    if detections["Torque Converter Judder"]:
-        recs.append("⚠️ Replace torque converter. Flush fluid.")
-    if detections["Lock-Up Judder"]:
-        recs.append("⚠️ Inspect lock-up control solenoid. Update CVT firmware.")
-    return recs
+def detect_torque_converter_judder(df):
+    primary = df.get('Primary Rev Speed')
+    secondary = df.get('Secondary Rev Speed')
 
-# --- Main logic ---
+    if primary is None or secondary is None:
+        return False
+
+    fluctuation = primary.diff().abs().combine(secondary.diff().abs(), max) > 50
+    return fluctuation.rolling(10).sum().max() > 5
+
+def detect_chain_slip(df):
+    engine = df.get('Engine Speed')
+    primary = df.get('Primary Rev Speed')
+    secondary = df.get('Secondary Rev Speed')
+    gear = df.get('Actual Gear Ratio')
+
+    if any(v is None for v in [engine, primary, secondary, gear]):
+        return False
+
+    overlap = (engine.diff().abs() < 50) & (primary.diff().abs() < 50) & (secondary.diff().abs() < 50)
+    return overlap.rolling(10).sum().max() > 5
+
+# ------------------- Streamlit App ------------------- #
+
+st.set_page_config(page_title="CVT Doctor Pro", layout="wide")
+st.title("🔧 CVT Doctor Pro")
+st.markdown("Subaru TR580 & TR690 CVT Diagnostic App — Based on 16-132-20R")
+
+uploaded_file = st.file_uploader("Upload your SSM4/BtSsm CSV file:", type=["csv"])
+
 if uploaded_file:
     df = load_csv(uploaded_file)
-    if df is not None and not df.empty:
-        st.success("CSV loaded successfully.")
-        detections = analyze_all(df)
+    st.success("✅ File loaded and parsed.")
 
-        st.header("📊 Diagnostic Summary")
-        for issue, found in detections.items():
-            st.write(f"**{issue}:** {'✅ Not Detected' if not found else '❌ Detected'}")
+    is_tr690 = detect_tr690(df)
+    st.markdown(f"**Detected Transmission:** {'TR690' if is_tr690 else 'TR580'}")
 
-        recommendations = get_recommendations(detections)
-        if recommendations:
-            st.header("🔧 Repair Recommendations")
-            for r in recommendations:
-                st.write(r)
-    else:
-        st.error("Failed to parse CSV file. Check format.")
+    st.subheader("📊 Diagnostic Summary")
+
+    results = {
+        "Chain Slip": detect_chain_slip(df),
+        "Micro Slip": detect_micro_slip(df),
+        "Short-Time Slip": detect_short_time_slip(df),
+        "Long-Time Slip": detect_long_time_slip(df),
+        "Forward Clutch Slip": detect_forward_clutch_slip(df, tr690=is_tr690),
+        "Lock-Up Judder": detect_lockup_judder(df),
+        "Torque Converter Judder": detect_torque_converter_judder(df),
+    }
+
+    for label, detected in results.items():
+        st.markdown(f"- **{label}**: {'❌ Not Detected' if not detected else '⚠️ Detected — Review Required'}")
+
+    st.divider()
+
+    st.markdown("🔁 [TSB 16-132-20R Reference](https://static.nhtsa.gov/odi/tsbs/2022/MC-10226904-0001.pdf)")
