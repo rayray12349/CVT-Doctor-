@@ -1,9 +1,9 @@
-# CVT Doctor Pro – app.py
+# CVT Doctor Pro – TSB-Aligned Edition
 import streamlit as st
 import pandas as pd
 
 st.set_page_config(page_title="CVT Doctor Pro", layout="wide")
-st.title("CVT Doctor Pro – Subaru CVT TSB Analysis")
+st.title("CVT Doctor Pro – Subaru CVT TSB Analyzer")
 
 uploaded_file = st.file_uploader("Upload Subaru CVT CSV Log", type=["csv"])
 cvt_type = st.selectbox("Select CVT Type", ["TR580", "TR690"])
@@ -58,7 +58,7 @@ def detect_forward_clutch_slip(df):
         if cvt_type != "TR690":
             return False
         rpm = safe_float(df['Engine Speed'])
-        front = safe_float(df['Front Wheel Speed.1'])  # TR690 RPM version
+        front = safe_float(df['Front Wheel Speed.1'])  # TR690 front wheel speed in RPM
         throttle = safe_float(df['Throttle Opening Angle'])
         diff = rpm - front
         return ((throttle > 10) & (diff > 300)).sum() >= 10
@@ -67,18 +67,14 @@ def detect_forward_clutch_slip(df):
 
 def detect_lockup_judder(df):
     try:
-        rpm = safe_float(df['Engine Speed'])
-        duty = safe_float(df['Lock Up Duty Ratio'])
+        primary = safe_float(df['Primary Rev Speed'])
+        secondary = safe_float(df['Secondary Rev Speed'])
         throttle = safe_float(df['Throttle Opening Angle'])
 
-        for i in range(30, len(rpm) - 30):
-            if (
-                1000 < rpm.iloc[i] < 2500 and
-                70 < duty.iloc[i] < 100 and
-                throttle.iloc[i] > 10
-            ):
-                local_std = rpm.iloc[i-15:i+15].std()
-                if local_std > 100:
+        for i in range(30, len(df) - 30):
+            if 1000 < primary.iloc[i] < 2500 and throttle.iloc[i] > 10:
+                segment_std = (primary.iloc[i-15:i+15] - secondary.iloc[i-15:i+15]).std()
+                if segment_std > 100:
                     return True
         return False
     except:
