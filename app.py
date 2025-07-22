@@ -144,10 +144,21 @@ def detect_chain_slip(df):
 
     throttle_active = throttle > 1.0
     gear_valid = gear > 1.5
-    speed_valid = speed > 3 if speed is not None else True
+    speed_valid = speed > 5 if speed is not None else True
 
-    overlap = (engine.diff().abs() < 50) & (primary.diff().abs() < 50) & (secondary.diff().abs() < 50)
-    return (overlap & throttle_active & gear_valid & speed_valid).rolling(10).sum().max() > 5
+    # Require meaningful RPM activity
+    rpm_activity = (
+        engine.diff().abs().rolling(10).mean() > 10
+    ) & (
+        primary.diff().abs().rolling(10).mean() > 10
+    ) & (
+        secondary.diff().abs().rolling(10).mean() > 10
+    )
+
+    overlap = (engine.diff().abs() < 30) & (primary.diff().abs() < 30) & (secondary.diff().abs() < 30)
+    valid_conditions = throttle_active & gear_valid & speed_valid & rpm_activity
+
+    return (overlap & valid_conditions).rolling(10).sum().max() > 5
 
 # ------------------- Streamlit App ------------------- #
 
