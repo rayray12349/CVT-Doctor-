@@ -19,28 +19,26 @@ def load_csv(file):
     return df.dropna(axis=1, how='all')
 
 def detect_tr690(df):
-    has_secondary = 'Secondary Rev Speed' in df.columns
-    has_front_wheel_speed = 'Front Wheel Speed' in df.columns
-    return has_secondary and has_front_wheel_speed
+    return 'Secondary Rev Speed' in df.columns and 'Front Wheel Speed' in df.columns
 
 def get_throttle(df):
-    throttle = df.get('Accel. Opening Angle')
-    if throttle is None:
-        throttle = df.get('Throttle Opening Angle')
-    return throttle
+    return df.get('Accel. Opening Angle') or df.get('Throttle Opening Angle')
 
 def get_speed(df):
-    speed = df.get('Front Wheel Speed')
-    if speed is None:
-        speed = df.get('Vehicle Speed')
-    return speed
+    return df.get('Front Wheel Speed') or df.get('Vehicle Speed')
 
-def is_throttle_stable(throttle_series, threshold=2, window=1.0, rate=10):
-    window_size = int(window * rate)
-    rolling_std = throttle_series.rolling(window=window_size).std()
-    return (rolling_std < threshold)
+def is_throttle_stable(throttle, threshold=2, window=1.0, rate=10):
+    rolling_std = throttle.rolling(int(window * rate)).std()
+    return rolling_std < threshold
 
-# ------------------- Detection Logic ------------------- #
+def get_peak_index(series):
+    if isinstance(series, pd.Series):
+        peak = series[series].rolling(10).sum()
+        if not peak.empty and peak.max() > 0:
+            return int(peak.idxmax())
+    return None
+
+# ---------------- TSB Detection Logic ---------------- #
 
 def detect_micro_slip(df, rate=10):
     gear = df.get('Actual Gear Ratio')
@@ -48,21 +46,22 @@ def detect_micro_slip(df, rate=10):
     sec = df.get('Secondary Rev Speed')
     throttle = get_throttle(df)
     speed = get_speed(df)
+    if any(v is None for v in [gear, prim, sec, throttle, speed]) or (speed <= 10).all():
+        return False, None
 
-    if any(v is None for v in [gear, prim, sec, throttle, speed]):
-        return False
-    if (speed <= 10).all():
-        return False
-
-    throttle_mask = throttle > 1.0
-    throttle_stable = is_throttle_stable(throttle, rate=rate)
+    throttle_stable = is_throttle_stable(throttle, rate)
+    throttle_active = throttle > 1.0
+    stable = throttle_stable & throttle_active
 
     gear_ptp = gear.rolling(rate).apply(lambda x: x.max() - x.min()) > 0.02
-    rpm_ptp = prim.rolling(rate).apply(lambda x: x.max() - x.min()) > 50
+    prim_ptp = prim.rolling(rate).apply(lambda x: x.max() - x.min()) > 50
     sec_ptp = sec.rolling(rate).apply(lambda x: x.max() - x.min()) > 50
+    rpm_fluct = prim_ptp | sec_ptp
 
-    rpm_fluct = rpm_ptp | sec_ptp
-    return (gear_ptp & rpm_fluct & throttle_mask & throttle_stable).any()
+    events = gear_ptp & rpm_fluct & stable
+    freq = events.rolling(rate).sum()
+    peak = get_peak_index(events)
+    return (freq >= 3).any(), peak
 
 def detect_short_time_slip(df):
     gear = df.get('Actual Gear Ratio')
@@ -70,17 +69,15 @@ def detect_short_time_slip(df):
     primary = df.get('Primary Rev Speed')
     secondary = df.get('Secondary Rev Speed')
     speed = get_speed(df)
+    if any(v is None for v in [gear, throttle, primary, secondary, speed]) or (speed <= 10).all():
+        return False, None
 
-    if any(v is None for v in [gear, throttle, primary, secondary, speed]):
-        return False
-    if (speed <= 10).all():
-        return False
-
-    active = throttle > 1.0
     gear_spike = gear.diff().abs() > 0.1
     rpm_fluct = primary.diff().abs().combine(secondary.diff().abs(), max) > 100
+    active = throttle > 1.0
     valid_range = gear > 1.5
-    return (gear_spike & rpm_fluct & active & valid_range).any()
+    events = gear_spike & rpm_fluct & active & valid_range
+    return events.any(), get_peak_index(events)
 
 def simulate_long_time_slip(df):
     duty = df.get('Primary UP Duty')
@@ -89,16 +86,14 @@ def simulate_long_time_slip(df):
     sec = df.get('Secondary Rev Speed')
     throttle = get_throttle(df)
     speed = get_speed(df)
-
-    if any(v is None for v in [duty, gear, prim, sec, throttle, speed]):
-        return False
-    if (speed <= 10).all():
-        return False
+    if any(v is None for v in [duty, gear, prim, sec, throttle, speed]) or (speed <= 10).all():
+        return False, None
 
     gear_drop = gear.rolling(5).mean() < gear.mean()
     rpm_fluct = prim.diff().abs().combine(sec.diff().abs(), max) > 50
-    slip_condition = (duty > 90) & gear_drop & (throttle > 1.0)
-    return (slip_condition & rpm_fluct).any()
+    active = (duty > 90) & gear_drop & (throttle > 1.0)
+    events = active & rpm_fluct
+    return events.any(), get_peak_index(events)
 
 def detect_forward_clutch_slip(df, tr690=True):
     if tr690:
@@ -107,35 +102,32 @@ def detect_forward_clutch_slip(df, tr690=True):
     else:
         upstream = df.get('Turbine Revolution Speed')
         downstream = df.get('Primary Rev Speed')
-
     if upstream is None or downstream is None:
-        return False
+        return False, None
 
     delta = upstream - downstream
-    flow_mismatch = delta.abs().rolling(5).mean() > 75
-    return flow_mismatch.any()
+    mismatch = delta.abs().rolling(5).mean() > 75
+    return mismatch.any(), get_peak_index(mismatch)
 
 def detect_lockup_judder(df):
     throttle = get_throttle(df)
     primary = df.get('Primary Rev Speed')
     secondary = df.get('Secondary Rev Speed')
-
-    if throttle is None or primary is None or secondary is None:
-        return False
+    if any(v is None for v in [throttle, primary, secondary]):
+        return False, None
 
     rpm_fluct = primary.diff().abs().combine(secondary.diff().abs(), max) > 50
-    active = (throttle > 10) & rpm_fluct
-    return active.rolling(10).sum().max() > 5
+    events = (throttle > 10) & rpm_fluct
+    return events.rolling(10).sum().max() > 5, get_peak_index(events)
 
 def detect_torque_converter_judder(df):
     primary = df.get('Primary Rev Speed')
     secondary = df.get('Secondary Rev Speed')
-
     if primary is None or secondary is None:
-        return False
+        return False, None
 
-    fluctuation = primary.diff().abs().combine(secondary.diff().abs(), max) > 50
-    return fluctuation.rolling(10).sum().max() > 5
+    fluct = primary.diff().abs().combine(secondary.diff().abs(), max) > 50
+    return fluct.rolling(10).sum().max() > 5, get_peak_index(fluct)
 
 def detect_chain_slip(df):
     engine = df.get('Engine Speed')
@@ -144,15 +136,10 @@ def detect_chain_slip(df):
     gear = df.get('Actual Gear Ratio')
     throttle = get_throttle(df)
     speed = get_speed(df)
+    if any(v is None for v in [engine, primary, secondary, gear, throttle, speed]) or (speed <= 10).all():
+        return False, None
 
-    if any(v is None for v in [engine, primary, secondary, gear, throttle, speed]):
-        return False
-
-    throttle_active = throttle > 1.0
-    gear_valid = gear > 1.5
-    speed_valid = speed > 10
-
-    rpm_activity = (
+    rpm_active = (
         engine.diff().abs().rolling(10).mean() > 10
     ) & (
         primary.diff().abs().rolling(10).mean() > 10
@@ -161,21 +148,19 @@ def detect_chain_slip(df):
     )
 
     overlap = (engine.diff().abs() < 30) & (primary.diff().abs() < 30) & (secondary.diff().abs() < 30)
-    valid_conditions = throttle_active & gear_valid & speed_valid & rpm_activity
-
-    return (overlap & valid_conditions).rolling(10).sum().max() > 5
+    events = overlap & (throttle > 1.0) & (gear > 1.5) & (speed > 10) & rpm_active
+    return events.rolling(10).sum().max() > 5, get_peak_index(events)
 
 # ------------------- Streamlit App ------------------- #
 
 st.set_page_config(page_title="CVT Doctor Pro", layout="wide")
 st.title("🔧 CVT Doctor Pro")
-st.markdown("Subaru TR580 & TR690 CVT Diagnostic App — Based on 16-132-20R")
+st.markdown("Subaru TR580 & TR690 CVT Diagnostic App — Based on TSB 16-132-20R")
 
 uploaded_file = st.file_uploader("Upload your SSM4/BtSsm CSV file:", type=["csv"])
-
 if uploaded_file:
     df = load_csv(uploaded_file)
-    st.success("✅ File loaded and parsed.")
+    st.success("✅ File loaded successfully.")
 
     is_tr690 = detect_tr690(df)
     st.markdown(f"**Detected Transmission:** {'TR690' if is_tr690 else 'TR580'}")
@@ -192,11 +177,12 @@ if uploaded_file:
         "Torque Converter Judder": (detect_torque_converter_judder(df), "Replace torque converter; inspect pump & solenoid function."),
     }
 
-    for label, (detected, recommendation) in results.items():
+    for label, ((detected, peak), recommendation) in results.items():
         if detected:
-            st.markdown(f"- **{label}**: ⚠️ Detected — **Review Required**  \n  _Recommendation: {recommendation}_")
+            peak_str = f" at row {peak}" if peak is not None else ""
+            st.markdown(f"- **{label}**: ⚠️ Detected{peak_str} — _{recommendation}_")
         else:
-            st.markdown(f"- **{label}**: ❌ Not Detected")
+            st.markdown(f"- **{label}**: ✅ Not Detected")
 
     st.divider()
     st.markdown("🔁 [TSB 16-132-20R Reference](https://static.nhtsa.gov/odi/tsbs/2022/MC-10226904-0001.pdf)")
