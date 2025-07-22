@@ -1,99 +1,110 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
+
+st.title("CVT Doctor Pro - Subaru TSB Diagnostic")
+
+uploaded_file = st.file_uploader("Upload Subaru SSM4/BtSsm CSV file", type=["csv"])
+cvt_type = st.selectbox("Select CVT Type", ["TR580", "TR690"])
 
 def safe_float(val):
     try:
         return float(val)
     except:
-        return None
+        return np.nan
 
 def load_csv(file):
-    df = pd.read_csv(file, encoding='ISO-8859-1', skiprows=8)
-    for col in df.columns:
-        df[col] = df[col].apply(safe_float)
+    df = pd.read_csv(file, skiprows=8)
+    df = df.applymap(safe_float)
     return df
 
-def detect_chain_slip(df):
-    if 'Actual Gear Ratio' in df and 'Primary Rev Speed' in df and 'Secondary Rev Speed' in df:
-        ratio = df['Primary Rev Speed'] / df['Secondary Rev Speed']
-        diff = (ratio - df['Actual Gear Ratio']).abs()
-        return diff.gt(0.5).sum() > 10
-    return False
+def is_steady_throttle(throttle, threshold=3):
+    return throttle.diff().abs().fillna(0) < threshold
 
-def detect_lockup_judder(df):
-    if 'Primary Rev Speed' in df and 'Secondary Rev Speed' in df and 'Lock Up Duty Ratio' in df and 'Accel. Opening Angle' in df:
-        throttle = df['Accel. Opening Angle'] > 10
-        fluct = (df['Primary Rev Speed'] - df['Secondary Rev Speed']).abs() > 100
-        lockup = (df['Lock Up Duty Ratio'] > 50) & throttle & fluct
-        return lockup.sum() > 10
-    return False
+def detect_forward_clutch_slip(df):
+    if cvt_type != "TR690" or 'Front Wheel Speed.1 (RPM)' not in df.columns:
+        return False
+    fws = df['Front Wheel Speed.1 (RPM)'].diff().apply(np.sign)
+    sec = df['Secondary Rev Speed'].diff().apply(np.sign)
+    throttle = df['Throttle Position (%)']
+    mismatch = (fws != sec) & is_steady_throttle(throttle) & (throttle > 10)
+    return mismatch.any()
 
-def detect_forward_clutch_slip(df, is_tr690):
-    if is_tr690:
-        if 'Front Wheel Speed.1' in df and 'Secondary Rev Speed' in df:
-            slip = (df['Secondary Rev Speed'] < df['Front Wheel Speed.1']) & (df['Accel. Opening Angle'] > 10)
-            return slip.sum() > 10
-    return False
-
-def detect_short_slip(df):
-    if 'Actual Gear Ratio' in df and 'Primary Rev Speed' in df and 'Secondary Rev Speed' in df:
-        ratio = df['Primary Rev Speed'] / df['Secondary Rev Speed']
-        diff = (ratio - df['Actual Gear Ratio']).abs()
-        return (diff.between(0.2, 0.5)).sum() > 10
-    return False
+def detect_torque_converter_judder(df):
+    p = df['Primary Rev Speed'].diff()
+    s = df['Secondary Rev Speed'].diff()
+    fluct = ((p - s).abs() > 50) & is_steady_throttle(df['Throttle Position (%)']) & (df['Throttle Position (%)'] > 10)
+    return fluct.any()
 
 def detect_micro_slip(df):
-    if 'Actual Gear Ratio' in df and 'Primary Rev Speed' in df and 'Secondary Rev Speed' in df:
-        ratio = df['Primary Rev Speed'] / df['Secondary Rev Speed']
-        diff = (ratio - df['Actual Gear Ratio']).abs()
-        return (diff.between(0.05, 0.2)).sum() > 10
-    return False
+    agr = df['Actual Gear Ratio']
+    s = df['Secondary Rev Speed']
+    p = df['Primary Rev Speed']
+    slip = (agr - s / p).abs() > 0.02
+    return slip.any()
 
-def detect_valve_body_irregularity(df):
-    if 'Secondary Set Current' in df and 'Secondary Actual Current' in df:
-        deviation = (df['Secondary Set Current'] - df['Secondary Actual Current']).abs()
-        return deviation.gt(0.5).sum() > 10
-    return False
+def detect_short_slip(df):
+    agr = df['Actual Gear Ratio']
+    s = df['Secondary Rev Speed']
+    p = df['Primary Rev Speed']
+    slip = (agr - s / p).abs() > 0.05
+    return slip.any()
 
-def app():
-    st.title("CVT Doctor Pro — Subaru TSB Diagnostic Tool")
+def detect_long_slip(df):
+    agr = df['Actual Gear Ratio']
+    s = df['Secondary Rev Speed']
+    p = df['Primary Rev Speed']
+    slip = (agr - s / p).abs() > 0.1
+    return slip.any()
 
-    is_tr690 = st.selectbox("Select Transmission Type", ["TR690", "TR580"]) == "TR690"
-    uploaded_file = st.file_uploader("Upload Subaru SSM4/BtSsm CSV File", type="csv")
+def detect_chain_slip(df):
+    if 'Engine RPM' not in df.columns or 'Primary RPM' not in df.columns:
+        return False
+    diff = (df['Engine RPM'] - df['Primary RPM']).abs()
+    return (diff > 100).any()
 
-    if uploaded_file:
-        df = load_csv(uploaded_file)
-        st.success("File loaded and processed successfully.")
+def detect_lockup_judder(df):
+    lockup = df['Lock Up Duty Ratio']
+    p = df['Primary Rev Speed'].diff()
+    s = df['Secondary Rev Speed'].diff()
+    rpm_range = (df['Engine RPM'] > 1200) & (df['Engine RPM'] < 2500)
+    judder = (p - s).abs() > 50
+    return (lockup.between(0.7, 0.95)) & is_steady_throttle(df['Throttle Position (%)']) & rpm_range & judder.any()
 
-        results = {
-            "Chain Slip": detect_chain_slip(df),
-            "Lock-Up Judder": detect_lockup_judder(df),
-            "Forward Clutch Slip": detect_forward_clutch_slip(df, is_tr690),
-            "Short Slip": detect_short_slip(df),
-            "Micro Slip": detect_micro_slip(df),
-            "Valve Body Irregularity": detect_valve_body_irregularity(df)
-        }
+def generate_report(df):
+    report = {}
+    report["Forward Clutch Slip"] = detect_forward_clutch_slip(df)
+    report["Torque Converter Judder"] = detect_torque_converter_judder(df)
+    report["Micro Slip"] = detect_micro_slip(df)
+    report["Short Slip"] = detect_short_slip(df)
+    report["Long Slip"] = detect_long_slip(df)
+    report["Chain Slip"] = detect_chain_slip(df)
+    report["Lock Up Judder"] = detect_lockup_judder(df)
+    return report
 
-        for issue, detected in results.items():
-            if detected:
-                st.error(f"{issue} detected. ⚠️")
-            else:
-                st.success(f"No {issue} detected.")
+def repair_recommendations(report):
+    recs = []
+    if report["Forward Clutch Slip"]:
+        recs.append("🔧 Check secondary pulley and valve body. Consider valve body replacement.")
+    if report["Torque Converter Judder"]:
+        recs.append("🔧 Inspect torque converter. Possible internal judder — replace converter if confirmed.")
+    if report["Micro Slip"] or report["Short Slip"] or report["Long Slip"]:
+        recs.append("🔧 Check belt/chain condition, pressure solenoids, and fluid degradation.")
+    if report["Chain Slip"]:
+        recs.append("🔧 Inspect engine/primary pulley relationship. Possible chain stretch.")
+    if report["Lock Up Judder"]:
+        recs.append("🔧 Verify lockup control circuit. Possible torque converter or solenoid irregularity.")
+    return recs
 
-        st.markdown("---")
+if uploaded_file:
+    df = load_csv(uploaded_file)
+    report = generate_report(df)
+    st.subheader("TSB Diagnostic Summary")
+    for key, val in report.items():
+        st.write(f"**{key}**: {'✅ Detected' if val else '❌ Not Detected'}")
+
+    recommendations = repair_recommendations(report)
+    if recommendations:
         st.subheader("Repair Recommendations")
-        for issue, detected in results.items():
-            if detected:
-                if issue == "Chain Slip":
-                    st.write("🔧 Replace CVT chain and inspect pulleys for wear.")
-                elif issue == "Lock-Up Judder":
-                    st.write("🔧 Replace torque converter and flush CVT fluid.")
-                elif issue == "Forward Clutch Slip":
-                    st.write("🔧 Inspect forward clutch pack and valve body for pressure issues.")
-                elif issue in ["Short Slip", "Micro Slip"]:
-                    st.write("🔧 Reflash TCM with latest software and inspect fluid condition.")
-                elif issue == "Valve Body Irregularity":
-                    st.write("🔧 Replace valve body and retest system calibration.")
-
-if __name__ == "__main__":
-    app()
+        for r in recommendations:
+            st.write(r)
