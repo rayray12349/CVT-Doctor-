@@ -58,14 +58,14 @@ def detect_micro_slip(df, time_series):
         return False, None
 
     stable = is_throttle_stable(throttle, window=10)
-    gear_ptp = gear.rolling(10).apply(lambda x: x.max() - x.min(), raw=True) > 0.02
-    prim_ptp = prim.rolling(10).apply(lambda x: x.max() - x.min(), raw=True) > 50
-    sec_ptp = sec.rolling(10).apply(lambda x: x.max() - x.min(), raw=True) > 50
-    rpm_fluct = prim_ptp | sec_ptp
+    gear_fluct = gear.rolling(5).apply(lambda x: x.max() - x.min(), raw=True) > 0.02
+    prim_fluct = prim.rolling(5).apply(lambda x: x.max() - x.min(), raw=True) > 50
+    sec_fluct = sec.rolling(5).apply(lambda x: x.max() - x.min(), raw=True) > 50
+    rpm_fluct = prim_fluct | sec_fluct
 
-    combined = stable & gear_ptp & rpm_fluct & (throttle > 1) & (speed > 10)
-    confirmed = combined.rolling(10).sum() >= 3
-    return confirmed.any(), get_peak_time(confirmed, time_series)
+    event = (gear_fluct & rpm_fluct & (throttle > 1) & stable & (speed > 10))
+    event_confirmed = event.rolling(10).sum() >= 3
+    return event_confirmed.any(), get_peak_time(event_confirmed, time_series)
 
 def detect_short_time_slip(df, time_series):
     gear = df.get('Actual Gear Ratio')
