@@ -164,7 +164,8 @@ if uploaded_file:
 
     for label, (detected, peak_time, confidence) in results.items():
         if detected:
-            st.markdown(f"### ⚠️ {label} Detected at {peak_time:.1f}s — _{recommendations[label]}_")
+            peak_str = f"{peak_time:.1f}s" if peak_time is not None else "unknown time"
+st.markdown(f"### ⚠️ {label} Detected at {peak_str} — _{recommendations[label]}_")
             st.markdown(f"Confidence Score: **{confidence:.1f}%**")
             fig, ax = plt.subplots()
             if label in ["Chain Slip", "Micro Slip", "Short-Time Slip", "Long-Time Slip"]:
