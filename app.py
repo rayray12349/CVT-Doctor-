@@ -130,25 +130,30 @@ def detect_chain_slip(df, time_series):
     confidence = min(100.0, events.sum() * 2)
     return events.rolling(10).sum().max() > 5, get_peak_time(events, time_series), confidence
         st.markdown(f"  • Confidence: **{confidence:.1f}%**")
+            for label, ((detected, peak_time, confidence), recommendation) in results.items():
+        if detected:
+            peak_str = f" at {peak_time:.1f}s" if peak_time is not None else ""
+            st.markdown(f"- **{label}**: ⚠️ Detected{peak_str} — _{recommendation}_")
+            st.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;• Confidence: **{confidence:.1f}%**")
 
-        # Visual Debug Chart
-        st.markdown(f"#### 🔍 {label} Debug Chart")
-        fig, ax = plt.subplots()
-        if label in ["Chain Slip", "Micro Slip", "Short-Time Slip", "Long-Time Slip"]:
-            ax.plot(time_series, df.get("Actual Gear Ratio"), label="Actual Gear Ratio")
-        if label in ["Forward Clutch Slip"]:
-            ax.plot(time_series, df.get("Secondary Rev Speed"), label="Secondary RPM")
-            ax.plot(time_series, df.get("Front Wheel Speed"), label="Front Wheel Speed")
-        if label in ["Lock-Up Judder", "Torque Converter Judder"]:
-            ax.plot(time_series, df.get("Primary Rev Speed"), label="Primary RPM")
-            ax.plot(time_series, df.get("Secondary Rev Speed"), label="Secondary RPM")
-        ax.set_title(f"{label} - Related Data")
-        ax.set_xlabel("Time (s)")
-        ax.set_ylabel("Sensor Value")
-        ax.legend()
-        st.pyplot(fig)
-    else:
-        st.markdown(f"- **{label}**: ✅ Not Detected")
+            # Debug Chart
+            st.markdown(f"#### 🔍 {label} Debug Chart")
+            fig, ax = plt.subplots()
+            if label in ["Chain Slip", "Micro Slip", "Short-Time Slip", "Long-Time Slip"]:
+                ax.plot(time_series, df.get("Actual Gear Ratio"), label="Actual Gear Ratio")
+            if label == "Forward Clutch Slip":
+                ax.plot(time_series, df.get("Secondary Rev Speed"), label="Secondary RPM")
+                ax.plot(time_series, df.get("Front Wheel Speed"), label="Front Wheel Speed")
+            if label in ["Lock-Up Judder", "Torque Converter Judder"]:
+                ax.plot(time_series, df.get("Primary Rev Speed"), label="Primary RPM")
+                ax.plot(time_series, df.get("Secondary Rev Speed"), label="Secondary RPM")
+            ax.set_title(f"{label} - Related Data")
+            ax.set_xlabel("Time (s)")
+            ax.set_ylabel("Sensor Value")
+            ax.legend()
+            st.pyplot(fig)
+        else:
+            st.markdown(f"- **{label}**: ✅ Not Detected")
 
-st.divider()
-st.markdown("🔁 [TSB 16-132-20R Reference](https://static.nhtsa.gov/odi/tsbs/2022/MC-10226904-0001.pdf)")
+    st.divider()
+    st.markdown("🔁 [TSB 16-132-20R Reference](https://static.nhtsa.gov/odi/tsbs/2022/MC-10226904-0001.pdf)")
