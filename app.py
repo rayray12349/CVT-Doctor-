@@ -39,45 +39,14 @@ def get_time(df):
     except:
         return None
 
+def is_throttle_stable(throttle, window=10):
+    return throttle.rolling(window=window).std() < 2
+
 def get_peak_time(events, time_series):
     if time_series is not None and events.any():
         peak_index = events[events].rolling(10).sum().idxmax()
         return float(time_series.iloc[peak_index]) if peak_index < len(time_series) else None
     return None
-
-def score_micro_slip(gear, primary, secondary, throttle, speed):
-    scores = []
-    for i in range(len(gear) - 20):
-        window = slice(i, i + 20)
-        t_window = throttle[window]
-        s_window = speed[window]
-        g_window = gear[window]
-        p_window = primary[window]
-        sec_window = secondary[window]
-
-        if t_window.mean() < 1 or t_window.std() > 2 or s_window.mean() < 10:
-            scores.append(0)
-            continue
-
-        agr_fluct = g_window.max() - g_window.min()
-        rpm_fluct = max(p_window.max() - p_window.min(), sec_window.max() - sec_window.min())
-
-        gear_diff = g_window.diff().abs() > 0.01
-        rpm_diff = p_window.diff().abs().combine(sec_window.diff().abs(), max) > 25
-        cycle_count = (gear_diff & rpm_diff).sum()
-
-        score = 0
-        if agr_fluct > 0.02:
-            score += 1
-        if rpm_fluct > 50:
-            score += 1
-        if cycle_count >= 3:
-            score += 1
-
-        scores.append(score)
-
-    scores += [0] * 20
-    return pd.Series(scores, index=gear.index)
 
 def detect_micro_slip(df, time_series):
     gear = df.get('Actual Gear Ratio')
@@ -88,10 +57,25 @@ def detect_micro_slip(df, time_series):
     if any(v is None for v in [gear, prim, sec, throttle, speed]) or (speed <= 10).all():
         return False, None
 
-    scores = score_micro_slip(gear, prim, sec, throttle, speed)
-    events = scores >= 2
-    return events.any(), get_peak_time(events, time_series)
+    score = pd.Series(0, index=df.index)
 
+    # Score for AGR fluctuation
+    agr_fluct = gear.rolling(5).apply(lambda x: x.max() - x.min(), raw=True) > 0.02
+    score += agr_fluct.fillna(False).astype(int)
+
+    # Score for RPM fluctuation
+    rpm_fluct = (prim.rolling(5).apply(lambda x: x.max() - x.min(), raw=True) > 50) | \
+                (sec.rolling(5).apply(lambda x: x.max() - x.min(), raw=True) > 50)
+    score += rpm_fluct.fillna(False).astype(int)
+
+    # Score for AGR frequency spikes
+    agr_cycles = gear.diff().abs().rolling(10).apply(lambda x: (x > 0.005).sum(), raw=True)
+    score += (agr_cycles > 3).fillna(False).astype(int)
+
+    stable = is_throttle_stable(throttle, window=10)
+    event = (score >= 3) & (throttle > 1) & stable & (speed > 10)
+
+    return event.any(), get_peak_time(event, time_series)
 def detect_short_time_slip(df, time_series):
     gear = df.get('Actual Gear Ratio')
     throttle = get_throttle(df)
@@ -164,7 +148,6 @@ def detect_chain_slip(df, time_series):
     overlap = (engine.diff().abs() < 30) & (primary.diff().abs() < 30) & (secondary.diff().abs() < 30)
     events = overlap & (throttle > 1.0) & (gear > 1.5) & (speed > 10) & rpm_active
     return events.rolling(10).sum().max() > 5, get_peak_time(events, time_series)
-
 # ---------- Streamlit App ----------
 
 st.set_page_config(page_title="CVT Doctor Pro", layout="wide")
@@ -198,6 +181,48 @@ if uploaded_file:
             st.markdown(f"- **{label}**: ⚠️ Detected{peak_str} — _{recommendation}_")
         else:
             st.markdown(f"- **{label}**: ✅ Not Detected")
+
+    st.subheader("📈 Diagnostic Graphs")
+    if results["Micro Slip"][0][0]:
+        st.markdown("**Micro Slip Debug**")
+        st.line_chart({
+            "Actual Gear Ratio": df.get("Actual Gear Ratio"),
+            "Throttle": get_throttle(df),
+            "Primary RPM": df.get("Primary Rev Speed"),
+            "Secondary RPM": df.get("Secondary Rev Speed")
+        })
+
+    for label, ((detected, _), _) in results.items():
+        if detected:
+            st.markdown(f"**{label}** Visual")
+            if label == "Chain Slip":
+                st.line_chart({
+                    "Engine RPM": df.get("Engine Speed"),
+                    "Primary RPM": df.get("Primary Rev Speed"),
+                    "Secondary RPM": df.get("Secondary Rev Speed"),
+                    "Actual Gear Ratio": df.get("Actual Gear Ratio")
+                })
+            elif label == "Forward Clutch Slip":
+                st.line_chart({
+                    "Secondary RPM": df.get("Secondary Rev Speed"),
+                    "Front Wheel Speed": df.get("Front Wheel Speed")
+                })
+            elif label == "Short-Time Slip":
+                st.line_chart({
+                    "Actual Gear Ratio": df.get("Actual Gear Ratio"),
+                    "Primary RPM": df.get("Primary Rev Speed"),
+                    "Secondary RPM": df.get("Secondary Rev Speed")
+                })
+            elif label in ["Lock-Up Judder", "Torque Converter Judder"]:
+                st.line_chart({
+                    "Primary RPM": df.get("Primary Rev Speed"),
+                    "Secondary RPM": df.get("Secondary Rev Speed")
+                })
+            elif label == "Long-Time Slip":
+                st.line_chart({
+                    "Actual Gear Ratio": df.get("Actual Gear Ratio"),
+                    "Primary UP Duty": df.get("Primary UP Duty")
+                })
 
     st.divider()
     st.markdown("🔁 [TSB 16-132-20R Reference](https://static.nhtsa.gov/odi/tsbs/2022/MC-10226904-0001.pdf)")
