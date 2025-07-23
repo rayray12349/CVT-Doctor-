@@ -94,14 +94,17 @@ def simulate_long_time_slip(df, time_series):
     return events.any(), get_peak_time(events, time_series), get_confidence(events)
 
 def detect_forward_clutch_slip(df, time_series, tr690=True):
-    upstream = df.get('Secondary Rev Speed') if tr690 else df.get('Turbine Revolution Speed')
-    downstream = df.get('Front Wheel Speed (RPM)') if tr690 else df.get('Primary Rev Speed')
+    upstream = df.get('Secondary Rev Speed')
+    downstream = df.get('Front Wheel Speed.1') if tr690 else df.get('Primary Rev Speed')
+    
     if upstream is None or downstream is None:
-        return False, None, 0
-    delta = (upstream - downstream).abs()
-    mismatch = delta.rolling(5).mean() > 75
-    return mismatch.any(), get_peak_time(mismatch, time_series), get_confidence(mismatch)
+        return False, None, 0.0
 
+    delta = upstream - downstream
+    mismatch = delta.abs().rolling(5).mean() > 75
+    confidence = min(100.0, mismatch.rolling(10).sum().max() * 10.0)
+    return mismatch.any(), get_peak_time(mismatch, time_series), confidence
+    
 def detect_lockup_judder(df, time_series):
     throttle = get_throttle(df)
     primary = df.get('Primary Rev Speed')
