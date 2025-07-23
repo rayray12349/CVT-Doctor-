@@ -129,8 +129,7 @@ def detect_chain_slip(df, time_series):
     events = overlap & (throttle > 1.0) & (gear > 1.5) & (speed > 10) & rpm_active
     confidence = min(100.0, events.sum() * 2)
     return events.rolling(10).sum().max() > 5, get_peak_time(events, time_series), confidence
-        st.markdown(f"  • Confidence: **{confidence:.1f}%**")
-            for label, ((detected, peak_time, confidence), recommendation) in results.items():
+    for label, ((detected, peak_time, confidence), recommendation) in results.items():
         if detected:
             peak_str = f" at {peak_time:.1f}s" if peak_time is not None else ""
             st.markdown(f"- **{label}**: ⚠️ Detected{peak_str} — _{recommendation}_")
