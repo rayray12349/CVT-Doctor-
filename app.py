@@ -68,6 +68,21 @@ def detect_micro_slip(df, time_series):
     confirmed = event.rolling(10).sum() >= 5
     confidence = min(100.0, confirmed.sum() * 2)
     return confirmed.any(), get_peak_time(confirmed, time_series), confidence
+
+def detect_short_time_slip(df, time_series):
+    gear = df.get('Actual Gear Ratio')
+    throttle = get_throttle(df)
+    primary = df.get('Primary Rev Speed')
+    secondary = df.get('Secondary Rev Speed')
+    speed = get_speed(df)
+    if any(v is None for v in [gear, throttle, primary, secondary, speed]) or (speed <= 10).all():
+        return False, None, 0.0
+
+    gear_spike = gear.diff().abs() > 0.1
+    rpm_fluct = primary.diff().abs().combine(secondary.diff().abs(), max) > 100
+    events = gear_spike & rpm_fluct & (throttle > 1.0) & (gear > 1.5) & (speed > 10)
+    confidence = min(100.0, events.sum() * 2)
+    return events.any(), get_peak_time(events, time_series), confidence
 def detect_forward_clutch_slip(df, time_series, tr690=True):
     upstream = df.get('Secondary Rev Speed') if tr690 else df.get('Turbine Revolution Speed')
     downstream = df.get('Front Wheel Speed') if tr690 else df.get('Primary Rev Speed')
@@ -114,58 +129,27 @@ def detect_chain_slip(df, time_series):
     events = overlap & (throttle > 1.0) & (gear > 1.5) & (speed > 10) & rpm_active
     confidence = min(100.0, events.sum() * 2)
     return events.rolling(10).sum().max() > 5, get_peak_time(events, time_series), confidence
-# ---------- Streamlit UI ----------
+        )
+        st.markdown(f"  • Confidence: **{confidence:.1f}%**")
 
-st.set_page_config(page_title="CVT Doctor Pro", layout="wide")
-st.title("🔧 CVT Doctor Pro")
-st.markdown("Subaru TR580 & TR690 CVT Diagnostic App — Based on TSB 16-132-20R")
+        # Visual Debug Chart
+        st.markdown(f"#### 🔍 {label} Debug Chart")
+        fig, ax = plt.subplots()
+        if label in ["Chain Slip", "Micro Slip", "Short-Time Slip", "Long-Time Slip"]:
+            ax.plot(time_series, df.get("Actual Gear Ratio"), label="Actual Gear Ratio")
+        if label in ["Forward Clutch Slip"]:
+            ax.plot(time_series, df.get("Secondary Rev Speed"), label="Secondary RPM")
+            ax.plot(time_series, df.get("Front Wheel Speed"), label="Front Wheel Speed")
+        if label in ["Lock-Up Judder", "Torque Converter Judder"]:
+            ax.plot(time_series, df.get("Primary Rev Speed"), label="Primary RPM")
+            ax.plot(time_series, df.get("Secondary Rev Speed"), label="Secondary RPM")
+        ax.set_title(f"{label} - Related Data")
+        ax.set_xlabel("Time (s)")
+        ax.set_ylabel("Sensor Value")
+        ax.legend()
+        st.pyplot(fig)
+    else:
+        st.markdown(f"- **{label}**: ✅ Not Detected")
 
-uploaded_file = st.file_uploader("Upload your SSM4/BtSsm CSV file:", type=["csv"])
-if uploaded_file:
-    df = load_csv(uploaded_file)
-    st.success("✅ File loaded successfully.")
-
-    is_tr690 = detect_tr690(df)
-    time_series = get_time(df)
-    st.markdown(f"**Detected Transmission:** {'TR690' if is_tr690 else 'TR580'}")
-
-    st.subheader("📊 Diagnostic Summary")
-
-    results = {
-        "Chain Slip": (detect_chain_slip(df, time_series), "Replace CVT & TCM if confirmed via SSM; submit QMR."),
-        "Micro Slip": (detect_micro_slip(df, time_series), "Replace CVT after confirming persistent fluctuation."),
-        "Short-Time Slip": (detect_short_time_slip(df, time_series), "Reprogram TCM; replace CVT if slip persists."),
-        "Long-Time Slip": (simulate_long_time_slip(df, time_series), "Reprogram TCM; monitor for progressive wear. (Simulated)"),
-        "Forward Clutch Slip": (detect_forward_clutch_slip(df, time_series, tr690=is_tr690), "Reprogram TCM; replace valve body or CVT."),
-        "Lock-Up Judder": (detect_lockup_judder(df, time_series), "Reprogram TCM; check ATF; replace converter if needed."),
-        "Torque Converter Judder": (detect_torque_converter_judder(df, time_series), "Replace torque converter; inspect pump & solenoids."),
-    }
-
-    for label, ((detected, peak_time, confidence), recommendation) in results.items():
-        if detected:
-            peak_str = f" at {peak_time:.1f}s" if peak_time is not None else ""
-            st.markdown(f"- **{label}**: ⚠️ Detected{peak_str} — _{recommendation}_")
-            st.markdown(f"  • Confidence: **{confidence:.1f}%**")
-
-            # Visual Debug Chart
-            st.markdown(f"#### 🔍 {label} Debug Chart")
-            fig, ax = plt.subplots()
-            if label in ["Chain Slip", "Micro Slip", "Short-Time Slip", "Long-Time Slip"]:
-                ax.plot(time_series, df.get("Actual Gear Ratio"), label="Actual Gear Ratio")
-            if label in ["Forward Clutch Slip"]:
-                ax.plot(time_series, df.get("Secondary Rev Speed"), label="Secondary RPM")
-                ax.plot(time_series, df.get("Front Wheel Speed"), label="Front Wheel Speed")
-            if label in ["Lock-Up Judder", "Torque Converter Judder"]:
-                ax.plot(time_series, df.get("Primary Rev Speed"), label="Primary RPM")
-                ax.plot(time_series, df.get("Secondary Rev Speed"), label="Secondary RPM")
-            ax.set_title(f"{label} - Related Data")
-            ax.set_xlabel("Time (s)")
-            ax.set_ylabel("Sensor Value")
-            ax.legend()
-            st.pyplot(fig)
-        else:
-            st.markdown(f"- **{label}**: ✅ Not Detected")
-
-    st.divider()
-    st.markdown("🔁 [TSB 16-132-20R Reference](https://static.nhtsa.gov/odi/tsbs/2022/MC-10226904-0001.pdf)")
-    
+st.divider()
+st.markdown("🔁 [TSB 16-132-20R Reference](https://static.nhtsa.gov/odi/tsbs/2022/MC-10226904-0001.pdf)")
