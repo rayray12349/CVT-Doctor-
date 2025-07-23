@@ -18,8 +18,7 @@ def load_csv(file):
     return df.dropna(axis=1, how='all')
 
 def detect_tr690(df):
-    rpm_cols = [col.strip().lower() for col in df.columns]
-    return any("front wheel speed" in col and "rpm" in col for col in rpm_cols)
+    return 'Front Wheel Speed.1' in df.columns
     
 def get_throttle(df):
     t1 = df.get('Accel. Opening Angle')
