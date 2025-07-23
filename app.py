@@ -171,7 +171,7 @@ if uploaded_file:
                 ax.plot(time_series, df.get("Actual Gear Ratio"), label="Actual Gear Ratio")
             elif label == "Forward Clutch Slip":
                 ax.plot(time_series, df.get("Secondary Rev Speed"), label="Secondary RPM")
-                ax.plot(time_series, df.get("Front Wheel Speed (RPM)"), label="Front Wheel Speed (RPM)")
+                ax.plot(time_series, df.get("Front Wheel Speed.1"), label="Front Wheel Speed (RPM)")
             elif label in ["Lock-Up Judder", "Torque Converter Judder"]:
                 ax.plot(time_series, df.get("Primary Rev Speed"), label="Primary RPM")
                 ax.plot(time_series, df.get("Secondary Rev Speed"), label="Secondary RPM")
