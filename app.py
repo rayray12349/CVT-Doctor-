@@ -4,6 +4,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 import io
 
+# ---------- CSV Handling ----------
+
 def safe_float(x):
     try:
         return float(x)
@@ -12,15 +14,12 @@ def safe_float(x):
 
 @st.cache_data
 def load_csv(file):
-    try:
-        content = file.read()
-        decoded = content.decode('utf-8', errors='replace')
-        df = pd.read_csv(io.StringIO(decoded), skiprows=8)
-        df = df.applymap(safe_float)
-        return df.dropna(axis=1, how='all')
-    except Exception as e:
-        st.error(f"🚨 CSV loading failed: {str(e)}")
-        return pd.DataFrame()
+    decoded = file.read().decode('utf-8', errors='ignore')
+    df = pd.read_csv(io.StringIO(decoded), skiprows=8)
+    df = df.applymap(safe_float)
+    return df.dropna(axis=1, how='all')
+
+# ---------- PID Utilities ----------
 
 def detect_tr690(df):
     return 'Front Wheel Speed (RPM)' in df.columns
@@ -44,53 +43,54 @@ def get_time(df):
         return df['TIME'].astype(float).reset_index(drop=True) / 1000
     except:
         return None
+# ---------- Core Analysis Utilities ----------
 
 def is_throttle_stable(throttle, window=10):
-    return throttle.rolling(window=window).std() < 2
+    return throttle.rolling(window=window).std() < 1.0
 
 def get_peak_time(events, time_series):
     if time_series is not None and events.any():
         peak_index = events[events].rolling(10).sum().idxmax()
         return float(time_series.iloc[peak_index]) if peak_index < len(time_series) else None
     return None
+
+def score_event(event_series, min_cycles=5):
+    return 100 * min(1.0, event_series.rolling(10).sum().max() / min_cycles)
+
+# ---------- Slip Detection Functions ----------
+
 def detect_micro_slip(df, time_series):
     gear = df.get('Actual Gear Ratio')
     prim = df.get('Primary Rev Speed')
     sec = df.get('Secondary Rev Speed')
     throttle = get_throttle(df)
     speed = get_speed(df)
-
     if any(v is None for v in [gear, prim, sec, throttle, speed]) or (speed <= 10).all():
-        return False, None, 0.0
+        return False, None, 0
 
     stable = is_throttle_stable(throttle, window=10)
     gear_fluct = gear.rolling(5).apply(lambda x: x.max() - x.min(), raw=True) > 0.06
     prim_fluct = prim.rolling(5).apply(lambda x: x.max() - x.min(), raw=True) > 50
     sec_fluct = sec.rolling(5).apply(lambda x: x.max() - x.min(), raw=True) > 50
     rpm_fluct = prim_fluct | sec_fluct
-
     event = (gear_fluct & rpm_fluct & (throttle > 10) & stable & (speed > 10))
-    score = event.rolling(10).sum().max()
-    confidence = min(100.0, (score or 0) * 10)
-    return score > 5, get_peak_time(event, time_series), confidence
-
+    event_confirmed = event.rolling(10).sum() >= 5
+    confidence = score_event(event_confirmed)
+    return confidence >= 30, get_peak_time(event_confirmed, time_series), confidence
 def detect_short_time_slip(df, time_series):
     gear = df.get('Actual Gear Ratio')
     throttle = get_throttle(df)
     primary = df.get('Primary Rev Speed')
     secondary = df.get('Secondary Rev Speed')
     speed = get_speed(df)
-
     if any(v is None for v in [gear, throttle, primary, secondary, speed]) or (speed <= 10).all():
-        return False, None, 0.0
+        return False, None, 0
 
     gear_spike = gear.diff().abs() > 0.1
     rpm_fluct = primary.diff().abs().combine(secondary.diff().abs(), max) > 100
-    events = gear_spike & rpm_fluct & (throttle > 1.0) & (gear > 1.5) & (speed > 10)
-
-    score = events.rolling(10).sum().max()
-    confidence = min(100.0, (score or 0) * 10)
-    return score > 5, get_peak_time(events, time_series), confidence
+    events = gear_spike & rpm_fluct & (throttle > 10.0) & (gear > 1.5) & (speed > 10)
+    confidence = score_event(events)
+    return confidence >= 30, get_peak_time(events, time_series), confidence
 
 def simulate_long_time_slip(df, time_series):
     duty = df.get('Primary UP Duty')
@@ -99,88 +99,54 @@ def simulate_long_time_slip(df, time_series):
     sec = df.get('Secondary Rev Speed')
     throttle = get_throttle(df)
     speed = get_speed(df)
-
     if any(v is None for v in [duty, gear, prim, sec, throttle, speed]) or (speed <= 10).all():
-        return False, None, 0.0
+        return False, None, 0
 
     gear_drop = gear.rolling(5).mean() < gear.mean()
     rpm_fluct = prim.diff().abs().combine(sec.diff().abs(), max) > 50
-    active = (duty > 90) & gear_drop & (throttle > 1.0)
+    active = (duty > 90) & gear_drop & (throttle > 10.0)
     events = active & rpm_fluct & (speed > 10)
-
-    score = events.rolling(10).sum().max()
-    confidence = min(100.0, (score or 0) * 10)
-    return score > 5, get_peak_time(events, time_series), confidence
+    confidence = score_event(events)
+    return confidence >= 30, get_peak_time(events, time_series), confidence
 def detect_forward_clutch_slip(df, time_series, tr690=True):
-    upstream = df.get('Secondary Rev Speed') if tr690 else df.get('Turbine Revolution Speed')
-    downstream = df.get('Front Wheel Speed (RPM)') if tr690 else df.get('Primary Rev Speed')
-    throttle = get_throttle(df)
-    speed = get_speed(df)
-
-    if any(v is None for v in [upstream, downstream, throttle, speed]) or (speed <= 10).all():
-        return False, None, 0.0
-
-    delta = (upstream - downstream).abs()
-    desync = delta.rolling(5).mean() > 75
-    events = desync & (throttle > 10) & (speed > 10)
-
-    score = events.rolling(10).sum().max()
-    confidence = min(100.0, (score or 0) * 10)
-    return score > 5, get_peak_time(events, time_series), confidence
+    if not tr690:
+        return False, None, 0
+    upstream = df.get('Secondary Rev Speed')
+    downstream = df.get('Front Wheel Speed (RPM)')
+    if upstream is None or downstream is None:
+        return False, None, 0
+    delta = upstream - downstream
+    mismatch = delta.abs().rolling(5).mean() > 75
+    confidence = score_event(mismatch)
+    return confidence >= 30, get_peak_time(mismatch, time_series), confidence
 
 def detect_lockup_judder(df, time_series):
     throttle = get_throttle(df)
     primary = df.get('Primary Rev Speed')
     secondary = df.get('Secondary Rev Speed')
     speed = get_speed(df)
-
     if any(v is None for v in [throttle, primary, secondary, speed]) or (speed <= 10).all():
-        return False, None, 0.0
-
-    rpm_fluct = primary.diff().abs().combine(secondary.diff().abs(), max) > 50
-    events = (throttle > 10) & rpm_fluct & (speed > 10)
-
-    score = events.rolling(10).sum().max()
-    confidence = min(100.0, (score or 0) * 10)
-    return score > 5, get_peak_time(events, time_series), confidence
+        return False, None, 0
+    fluct_primary = primary.diff().abs()
+    fluct_secondary = secondary.diff().abs()
+    fluct = (fluct_primary.combine(fluct_secondary, max) > 50)
+    sustained = fluct.rolling(10).sum() >= 5
+    events = (throttle > 10) & sustained & (speed > 10)
+    confidence = score_event(events)
+    return confidence >= 30, get_peak_time(events, time_series), confidence
 
 def detect_torque_converter_judder(df, time_series):
     primary = df.get('Primary Rev Speed')
     secondary = df.get('Secondary Rev Speed')
     throttle = get_throttle(df)
     speed = get_speed(df)
-
     if any(v is None for v in [primary, secondary, throttle, speed]) or (speed <= 10).all():
-        return False, None, 0.0
-
-    fluct = primary.diff().abs().combine(secondary.diff().abs(), max) > 50
-    events = fluct & (throttle > 10) & (speed > 10)
-
-    score = events.rolling(10).sum().max()
-    confidence = min(100.0, (score or 0) * 10)
-    return score > 5, get_peak_time(events, time_series), confidence
-
-def detect_chain_slip(df, time_series):
-    engine = df.get('Engine Speed')
-    primary = df.get('Primary Rev Speed')
-    secondary = df.get('Secondary Rev Speed')
-    gear = df.get('Actual Gear Ratio')
-    throttle = get_throttle(df)
-    speed = get_speed(df)
-
-    if any(v is None for v in [engine, primary, secondary, gear, throttle, speed]) or (speed <= 10).all():
-        return False, None, 0.0
-
-    rpm_active = (
-        engine.diff().abs().rolling(10).mean() > 10
-    ) & (primary.diff().abs().rolling(10).mean() > 10) & (secondary.diff().abs().rolling(10).mean() > 10)
-
-    overlap = (engine.diff().abs() < 30) & (primary.diff().abs() < 30) & (secondary.diff().abs() < 30)
-    events = overlap & (throttle > 1.0) & (gear > 1.5) & (speed > 10) & rpm_active
-
-    score = events.rolling(10).sum().max()
-    confidence = min(100.0, (score or 0) * 10)
-    return score > 5, get_peak_time(events, time_series), confidence
+        return False, None, 0
+    fluct = (primary.diff().abs().combine(secondary.diff().abs(), max) > 50)
+    sustained = fluct.rolling(10).sum() >= 5
+    events = (throttle > 10) & sustained & (speed > 10)
+    confidence = score_event(events)
+    return confidence >= 30, get_peak_time(events, time_series), confidence
 # ---------- Streamlit App ----------
 
 st.set_page_config(page_title="CVT Doctor Pro", layout="wide")
@@ -192,7 +158,7 @@ if uploaded_file:
     df = load_csv(uploaded_file)
     st.success("✅ File loaded successfully.")
 
-    is_tr690 = 'Front Wheel Speed (RPM)' in df.columns
+    is_tr690 = detect_tr690(df)
     time_series = get_time(df)
     st.markdown(f"**Detected Transmission:** {'TR690' if is_tr690 else 'TR580'}")
 
@@ -203,7 +169,7 @@ if uploaded_file:
         "Micro Slip": (detect_micro_slip(df, time_series), "Replace CVT after confirming persistent fluctuation."),
         "Short-Time Slip": (detect_short_time_slip(df, time_series), "Reprogram TCM; replace CVT if slip persists."),
         "Long-Time Slip": (simulate_long_time_slip(df, time_series), "Reprogram TCM; monitor for progressive wear. (Simulated)"),
-        "Forward Clutch Slip": (detect_forward_clutch_slip(df, time_series, tr690=is_tr690) if is_tr690 else (False, None, 0.0), "Reprogram TCM; replace valve body or CVT."),
+        "Forward Clutch Slip": (detect_forward_clutch_slip(df, time_series, tr690=is_tr690), "Reprogram TCM; replace valve body or CVT."),
         "Lock-Up Judder": (detect_lockup_judder(df, time_series), "Reprogram TCM; check ATF; replace converter if needed."),
         "Torque Converter Judder": (detect_torque_converter_judder(df, time_series), "Replace torque converter; inspect pump & solenoids."),
     }
